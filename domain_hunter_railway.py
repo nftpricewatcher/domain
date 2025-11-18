@@ -13,16 +13,9 @@ import sys
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 import re
-
-warnings.filterwarnings('ignore')
-
-try:
-    import requests
-    from requests.packages.urllib3.exceptions import InsecureRequestWarning
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-except:
-    print("ERROR: requests module required. Install with: pip install requests")
-    sys.exit(1)
+import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
 # Setup logging
 log_level = os.environ.get('LOG_LEVEL', 'INFO')
@@ -43,16 +36,16 @@ PRIORITY_TLDS = [
 ]
 
 class WhoisProxyRotator:
-    """Rotates through multiple WHOIS proxy services to avoid rate limits"""
+    """Rotates through multiple WHOIS services and proxies to avoid rate limits"""
     
     def __init__(self):
         self.services = [
-            # Primary services
-            {'name': 'whois.com', 'func': self.check_whois_com, 'weight': 10},
-            {'name': 'who.is', 'func': self.check_who_is, 'weight': 10},
-            {'name': 'godaddy', 'func': self.check_godaddy, 'weight': 10},
-            {'name': 'namecheap', 'func': self.check_namecheap, 'weight': 10},
-            {'name': 'porkbun', 'func': self.check_porkbun, 'weight': 10},
+            # Primary services (higher weights for reliable ones)
+            {'name': 'whois.com', 'func': self.check_whois_com, 'weight': 12},
+            {'name': 'who.is', 'func': self.check_who_is, 'weight': 12},
+            {'name': 'godaddy', 'func': self.check_godaddy, 'weight': 15},
+            {'name': 'namecheap', 'func': self.check_namecheap, 'weight': 15},
+            {'name': 'porkbun', 'func': self.check_porkbun, 'weight': 12},
             
             # Additional WHOIS services
             {'name': 'whoisxml', 'func': self.check_whoisxmlapi, 'weight': 8},
@@ -70,14 +63,91 @@ class WhoisProxyRotator:
             {'name': 'register.com', 'func': self.check_registercom, 'weight': 5},
             {'name': 'bluehost', 'func': self.check_bluehost, 'weight': 6},
             {'name': 'dreamhost', 'func': self.check_dreamhost, 'weight': 5},
+            
+            # New services for more rotation
+            {'name': 'icann', 'func': self.check_icann, 'weight': 10},
+            {'name': 'verisign', 'func': self.check_verisign, 'weight': 10},
+            {'name': 'networksolutions', 'func': self.check_networksolutions, 'weight': 8},
+            {'name': 'ultratools', 'func': self.check_ultratools, 'weight': 8},
+        ]
+        
+        # No hardcoded proxies - scrape fresh
+        self.proxies = []
+        
+        # Sources for scraping new proxies
+        self.proxy_sources = [
+            'https://free-proxy-list.net/',
+            'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&country=all&anonymity=all&timeout=20000&limit=100',
+            'https://www.proxy-list.download/api/v1/get?type=http',
+            'https://geonode.com/free-proxy-list',
+            'https://spys.one/en/http-proxy-list/',
+            'https://www.sslproxies.org/',
+            'https://hidemy.name/en/proxy-list/'
         ]
         
         # Track service health
         self.service_health = {s['name']: {'failures': 0, 'last_used': 0} for s in self.services}
+        self.last_reset = time.time()
+        self.last_proxy_refresh = time.time()
         
+        # Initial proxy refresh
+        self.refresh_proxies()
+    
+    def refresh_proxies(self):
+        """Scrape and test new proxies from sources"""
+        logger.info("Refreshing proxy list...")
+        new_proxies = []
+        pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})'
+        
+        for source in self.proxy_sources:
+            try:
+                r = requests.get(source, timeout=15, verify=False)
+                if r.status_code == 200:
+                    found = re.findall(pattern, r.text)
+                    for ip, port in found:
+                        new_proxies.append(f"{ip}:{port}")
+            except Exception as e:
+                logger.debug(f"Failed to scrape {source}: {e}")
+        
+        # Deduplicate
+        new_proxies = list(set(new_proxies))
+        
+        # Test proxies in parallel
+        good_proxies = []
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(self.test_proxy, p) for p in new_proxies]
+            for future in futures:
+                result = future.result()
+                if result:
+                    good_proxies.append(result)
+        
+        # Update proxy list
+        self.proxies = list(set(good_proxies))
+        logger.info(f"Proxy refresh complete: now {len(self.proxies)} proxies available")
+        self.last_proxy_refresh = time.time()
+    
+    def test_proxy(self, p):
+        """Test if proxy works"""
+        try:
+            proxies = {'http': f'http://{p}', 'https': f'https://{p}'}
+            r = requests.get('https://httpbin.org/ip', proxies=proxies, timeout=5, verify=False)
+            if r.status_code == 200:
+                return p
+        except:
+            pass
+        return None
+    
     def get_next_service(self):
         """Get next healthy service using weighted rotation"""
         current_time = time.time()
+        
+        # Periodic health recovery every 10 minutes
+        if current_time - self.last_reset > 600:
+            for health in self.service_health.values():
+                if health['failures'] > 0:
+                    health['failures'] -= 1
+            self.last_reset = current_time
+            logger.info("Periodic service health recovery applied")
         
         # Build list of available services
         available = []
@@ -86,32 +156,29 @@ class WhoisProxyRotator:
             health = self.service_health[name]
             
             # Skip if too many failures
-            if health['failures'] > 7:
+            if health['failures'] > 10:
                 continue
                 
-            # Skip if used too recently (within 1.5 seconds)
-            if current_time - health['last_used'] < 1.5:
+            # Skip if used too recently
+            if current_time - health['last_used'] < 3:
                 continue
                 
-            # Add based on weight
             available.extend([service] * service['weight'])
         
         if not available:
-            # All services exhausted, reset and wait
-            logger.warning("All services rate limited or failed, resetting...")
+            logger.warning("All services rate limited or failed, forcing reset...")
             for name in self.service_health:
-                self.service_health[name]['failures'] = max(0, self.service_health[name]['failures'] - 3)
-            time.sleep(8)
-            # Force pick any service after reset
+                self.service_health[name]['failures'] = max(0, self.service_health[name]['failures'] - 5)
+            time.sleep(20)
             return random.choice(self.services)
         
-        # Pick random service from weighted list
         return random.choice(available)
     
     def query_once(self, domain):
         """Query a single service"""
         service = self.get_next_service()
         name = service['name']
+        self.service_health[name]['last_used'] = time.time()
         try:
             logger.debug(f"Checking {domain} with {name}")
             result = service['func'](domain)
@@ -125,14 +192,26 @@ class WhoisProxyRotator:
             self.service_health[name]['failures'] += 1
         return None, name
     
-    # Service implementation methods - all kept, with improvements to key ones
+    def _get_response(self, url, headers):
+        """Helper for requests with proxy rotation"""
+        if self.proxies:
+            proxy = random.choice(self.proxies)
+            proxies = {'http': f'http://{proxy}', 'https': f'https://{proxy}'}
+        else:
+            proxies = None
+        try:
+            return requests.get(url, headers=headers, timeout=10, verify=False, proxies=proxies)
+        except:
+            return None
+    
+    # Service implementation methods
     
     def check_whois_com(self, domain):
         """Check whois.com"""
         try:
             url = f"https://www.whois.com/whois/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text.lower()
@@ -150,7 +229,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://who.is/whois/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text
@@ -167,7 +246,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://find.godaddy.com/domainsapi/v1/search/exact?q={domain}&key=dpp_search"
             headers = {'User-Agent': self._get_random_ua(), 'Accept': 'application/json'}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 data = response.json()
@@ -182,7 +261,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text.lower()
@@ -199,7 +278,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://porkbun.com/products/domains/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text.lower()
@@ -216,7 +295,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://mxtoolbox.com/SuperTool.aspx?action=whois%3a{domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text
@@ -232,7 +311,7 @@ class WhoisProxyRotator:
         """Check via whoisxmlapi (free tier)"""
         try:
             url = f"https://www.whoisxmlapi.com/whoisserver/WhoisService?domainName={domain}"
-            response = requests.get(url, timeout=10, verify=False)
+            response = self._get_response(url, {})
             if 'No Data Found' in response.text or 'NOT FOUND' in response.text:
                 return True
             if 'registrar' in response.text.lower():
@@ -246,7 +325,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://whois.domaintools.com/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text
@@ -262,7 +341,7 @@ class WhoisProxyRotator:
         """Check via whatsmydns.net"""
         try:
             url = f"https://www.whatsmydns.net/api/domain/{domain}"
-            response = requests.get(url, timeout=10, verify=False)
+            response = self._get_response(url, {})
             if response.status_code == 404:
                 return True
             if response.status_code == 200:
@@ -276,7 +355,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.hostinger.com/domain-name-search?domain={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text.lower()
@@ -293,7 +372,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.name.com/domain/search/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text.lower()
@@ -310,7 +389,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.hover.com/domains/results?q={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 if 'available' in response.text.lower() and 'taken' not in response.text.lower():
@@ -326,7 +405,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.gandi.net/domain/suggest?search={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text.lower()
@@ -343,7 +422,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.namesilo.com/domain/search-domains?query={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 if 'available' in response.text.lower():
@@ -359,7 +438,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.dynadot.com/domain/search.html?domain={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 text = response.text.lower()
@@ -376,7 +455,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.enom.com/domains/search-results?query={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 if 'available' in response.text.lower():
@@ -392,7 +471,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.domain.com/domains/search/results/?q={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 if 'available' in response.text.lower():
@@ -408,7 +487,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.register.com/domain/search/wizard.rcmx?searchDomainName={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 if 'is available' in response.text.lower():
@@ -424,7 +503,7 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.bluehost.com/domains?search={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 if 'available' in response.text.lower():
@@ -440,12 +519,80 @@ class WhoisProxyRotator:
         try:
             url = f"https://www.dreamhost.com/domains/search/?domain={domain}"
             headers = {'User-Agent': self._get_random_ua()}
-            response = requests.get(url, headers=headers, timeout=10, verify=False)
+            response = self._get_response(url, headers)
             
             if response.status_code == 200:
                 if 'is available' in response.text.lower():
                     return True
                 if 'is taken' in response.text.lower():
+                    return False
+            return None
+        except:
+            return None
+    
+    def check_icann(self, domain):
+        """Check ICANN Lookup"""
+        try:
+            url = f"https://lookup.icann.org/api/v2/domain?name={domain}"
+            headers = {'User-Agent': self._get_random_ua(), 'Accept': 'application/json'}
+            response = self._get_response(url, headers)
+            if response.status_code == 404:
+                return True  # Not registered
+            if response.status_code == 200:
+                text = response.text.lower()
+                if 'registered' in text or 'registrar' in text:
+                    return False
+                return True
+            return None
+        except:
+            return None
+    
+    def check_verisign(self, domain):
+        """Check Verisign"""
+        try:
+            url = f"https://webwhois.verisign.com/webwhois-ui/rest/whois?q={domain}&lang=en_US"
+            headers = {'User-Agent': self._get_random_ua(), 'Accept': 'application/json'}
+            response = self._get_response(url, headers)
+            
+            if response.status_code == 200:
+                text = response.text.lower()
+                if 'no match' in text or 'available' in text:
+                    return True
+                if 'registrar' in text or 'creation date' in text:
+                    return False
+            return None
+        except:
+            return None
+    
+    def check_networksolutions(self, domain):
+        """Check Network Solutions"""
+        try:
+            url = f"https://www.networksolutions.com/whois-search/{domain}"
+            headers = {'User-Agent': self._get_random_ua()}
+            response = self._get_response(url, headers)
+            
+            if response.status_code == 200:
+                text = response.text.lower()
+                if 'available' in text or 'not registered' in text:
+                    return True
+                if 'registered' in text or 'registrar' in text:
+                    return False
+            return None
+        except:
+            return None
+    
+    def check_ultratools(self, domain):
+        """Check UltraTools"""
+        try:
+            url = f"https://www.ultratools.com/tools/domainWhois?domainName={domain}"
+            headers = {'User-Agent': self._get_random_ua()}
+            response = self._get_response(url, headers)
+            
+            if response.status_code == 200:
+                text = response.text.lower()
+                if 'domain not found' in text or 'available' in text:
+                    return True
+                if 'registrar' in text or 'creation date' in text:
                     return False
             return None
         except:
@@ -486,7 +633,7 @@ class DomainHunter:
         self.running = False
         self.save_state()
         self.save_results()
-        self.save_uncertain()  # Kept for legacy
+        self.save_uncertain()
         sys.exit(0)
         
     def load_state(self):
@@ -647,6 +794,10 @@ class DomainHunter:
             
             logger.info(f"Checking {current_length}-char .{current_tld} domains ({len(all_combos)} total)")
             
+            # Check for proxy refresh before starting batch
+            if time.time() - self.proxy.last_proxy_refresh > 3600 or len(self.proxy.proxies) < 10:
+                self.proxy.refresh_proxies()
+            
             for i in range(self.state['current_combo_index'], len(all_combos)):
                 if not self.running:
                     break
@@ -661,7 +812,7 @@ class DomainHunter:
                         logger.info(f"Checked {self.check_count} domains, found {len(self.found_domains)}")
                     continue
                 
-                # Comprehensive check
+                # Comprehensive check using proxy rotation
                 status = self.comprehensive_check(domain)
                 
                 self.state['total_checked'] += 1
@@ -709,7 +860,7 @@ class DomainHunter:
                     self.save_state()
                     self.last_save = time.time()
                 
-                # Minimal delay
+                # Minimal delay since we're using different services
                 time.sleep(random.uniform(0.2, 0.5))
             
             self.state['current_tld_index'] += 1
