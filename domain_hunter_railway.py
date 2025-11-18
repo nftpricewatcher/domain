@@ -27,8 +27,9 @@ except:
     sys.exit(1)
 
 # Setup logging
+log_level = os.environ.get('LOG_LEVEL', 'INFO')  # Can set to DEBUG for more details
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, log_level),
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('domain_hunter.log'),
@@ -74,8 +75,10 @@ class DomainHunter:
     def __init__(self):
         self.state_file = 'hunter_state.json'
         self.results_file = 'found_domains.json'
+        self.uncertain_file = 'uncertain_domains.json'  # Track uncertain for manual review
         self.state = self.load_state()
         self.found_domains = self.load_results()
+        self.uncertain_domains = self.load_uncertain()
         self.running = True
         self.check_count = 0
         self.last_save = time.time()
@@ -89,6 +92,7 @@ class DomainHunter:
         self.running = False
         self.save_state()
         self.save_results()
+        self.save_uncertain()
         sys.exit(0)
         
     def load_state(self):
@@ -133,6 +137,21 @@ class DomainHunter:
         with open(self.results_file, 'w') as f:
             json.dump(self.found_domains, f, indent=2)
     
+    def load_uncertain(self):
+        """Load uncertain domains for review"""
+        if os.path.exists(self.uncertain_file):
+            try:
+                with open(self.uncertain_file, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+        return []
+    
+    def save_uncertain(self):
+        """Save uncertain domains"""
+        with open(self.uncertain_file, 'w') as f:
+            json.dump(self.uncertain_domains, f, indent=2)
+    
     def quick_dns_check(self, domain):
         """Fast DNS check to filter out taken domains"""
         try:
@@ -163,26 +182,51 @@ class DomainHunter:
                     break
             s.close()
             
-            resp_text = response.decode('utf-8', errors='ignore').lower()
+            resp_text = response.decode('utf-8', errors='ignore')
+            resp_lower = resp_text.lower()
+            
+            # Log the response for debugging
+            if len(resp_text.strip()) < 200:
+                logger.debug(f"WHOIS for {domain}: {resp_text.strip()[:100]}")
+            
+            # VERY SHORT or EMPTY response = likely available
+            if len(resp_text.strip()) < 50:
+                logger.debug(f"{domain} - Very short WHOIS response, marking as available")
+                return True
             
             # Clear indicators of availability
-            if any(x in resp_text for x in ['no data found', 'not found', 'no match', 'available']):
+            if any(x in resp_lower for x in [
+                'no data found', 'not found', 'no match', 'available',
+                'not registered', 'no entries found', 'status: free',
+                'domain not found', 'no matching record'
+            ]):
                 return True
             
             # Premium domain indicators
-            if any(x in resp_text for x in ['premium', 'broker', 'aftermarket', 'reserved']):
+            if any(x in resp_lower for x in ['premium', 'broker', 'aftermarket', 'reserved']):
                 return 'premium'
                 
-            # Check for registration data
-            if any(x in resp_text for x in ['registrar:', 'creation date:', 'expiry date:', 'name server:']):
+            # Check for registration data - if ANY of these exist, it's taken
+            registration_markers = [
+                'registrar:', 'creation date:', 'created:', 'registered:',
+                'expiry date:', 'expires:', 'updated:', 'name server:',
+                'registrant:', 'domain name:', 'registry domain id:'
+            ]
+            
+            if any(marker in resp_lower for marker in registration_markers):
                 return False
                 
-            # Short response usually means available
-            if len(resp_text.strip()) < 100:
+            # If response is short-ish with no registration data, likely available
+            if len(resp_text.strip()) < 150:
+                logger.debug(f"{domain} - Short WHOIS with no registration data, marking as available")
                 return True
                 
+            # Uncertain - log for review
+            logger.debug(f"{domain} - Uncertain WHOIS response length: {len(resp_text)}")
             return None
+            
         except Exception as e:
+            logger.debug(f"WHOIS error for {domain}: {e}")
             return None
     
     def check_godaddy(self, domain):
@@ -238,55 +282,140 @@ class DomainHunter:
         except:
             return None
     
+    def check_porkbun(self, domain):
+        """Check Porkbun - they have a good API for availability"""
+        try:
+            # Porkbun's public API endpoint
+            url = f"https://porkbun.com/api/json/v3/pricing/get"
+            response = requests.get(url, timeout=5, verify=False)
+            
+            # Alternative: Check their domain search page
+            search_url = f"https://porkbun.com/products/domains/{domain}"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            search_response = requests.get(search_url, headers=headers, timeout=5, verify=False)
+            
+            if search_response.status_code == 200:
+                text = search_response.text.lower()
+                
+                # If "add to cart" or "register" button exists, it's available
+                if 'add to cart' in text or 'register this domain' in text:
+                    return True
+                    
+                # If it says taken or unavailable
+                if 'unavailable' in text or 'already registered' in text:
+                    return False
+                    
+                # Check for premium
+                if 'premium' in text:
+                    return 'premium'
+                    
+            return None
+        except:
+            return None
+    
     def comprehensive_check(self, domain):
         """Comprehensive check using multiple sources"""
         results = {'available': 0, 'taken': 0, 'premium': 0, 'unknown': 0}
+        details = []
         
-        # 1. Direct WHOIS (most reliable)
+        # 1. Direct WHOIS (most reliable for positive availability)
         whois_result = self.direct_whois_check(domain)
         if whois_result == True:
-            results['available'] += 2
+            results['available'] += 3  # Strong signal
+            details.append("WHOIS: available")
         elif whois_result == 'premium':
             results['premium'] += 3
-            return 'premium'  # Skip immediately if premium
+            details.append("WHOIS: premium")
+            logger.info(f"  {domain} - Premium domain detected")
+            return 'premium'
         elif whois_result == False:
-            results['taken'] += 3
+            results['taken'] += 2  # Less weight since WHOIS can be wrong
+            details.append("WHOIS: taken")
         else:
             results['unknown'] += 1
+            details.append("WHOIS: unknown")
         
         # 2. GoDaddy check
         godaddy_result, price = self.check_godaddy(domain)
         if godaddy_result == 'premium':
             results['premium'] += 2
+            details.append(f"GoDaddy: premium ${price}")
             return 'premium'
         elif godaddy_result == True:
             results['available'] += 2
+            details.append(f"GoDaddy: available ${price if price else '?'}")
         elif godaddy_result == False:
-            results['taken'] += 2
+            results['taken'] += 1  # Less weight
+            details.append("GoDaddy: taken")
         else:
             results['unknown'] += 1
+            details.append("GoDaddy: unknown")
         
         # 3. Namecheap check
         namecheap_result = self.check_namecheap(domain)
         if namecheap_result == 'premium':
             results['premium'] += 2
+            details.append("Namecheap: premium")
             return 'premium'
         elif namecheap_result == True:
-            results['available'] += 1
+            results['available'] += 2
+            details.append("Namecheap: available")
         elif namecheap_result == False:
-            results['taken'] += 2
+            results['taken'] += 1
+            details.append("Namecheap: taken")
         else:
             results['unknown'] += 1
+            details.append("Namecheap: unknown")
         
-        # Decision logic
+        # 4. Porkbun check
+        porkbun_result = self.check_porkbun(domain)
+        if porkbun_result == 'premium':
+            results['premium'] += 1
+            details.append("Porkbun: premium")
+            return 'premium'
+        elif porkbun_result == True:
+            results['available'] += 2
+            details.append("Porkbun: available")
+        elif porkbun_result == False:
+            results['taken'] += 1
+            details.append("Porkbun: taken")
+        else:
+            results['unknown'] += 1
+            details.append("Porkbun: unknown")
+        
+        # Log details for debugging
+        logger.debug(f"{domain} - Scores: available={results['available']}, taken={results['taken']}, unknown={results['unknown']}")
+        logger.debug(f"{domain} - Details: {', '.join(details)}")
+        
+        # Decision logic - LESS CONSERVATIVE
         if results['premium'] > 0:
             return 'premium'
-        if results['taken'] >= 3:
-            return 'taken'
-        if results['available'] >= 3 and results['taken'] == 0:
+            
+        # If WHOIS shows available and at least one other source agrees, it's available
+        if whois_result == True and results['available'] >= 5:
+            logger.info(f"  {domain} - Strong availability signal")
             return 'available'
-        
-        return 'uncertain'
+            
+        # If multiple sources say available and taken signals are weak
+        if results['available'] >= 4 and results['taken'] <= 1:
+            logger.info(f"  {domain} - Multiple sources confirm availability")
+            return 'available'
+            
+        # If strongly taken
+        if results['taken'] >= 4:
+            return 'taken'
+            
+        # If more available signals than taken
+        if results['available'] > results['taken'] and results['available'] >= 3:
+            logger.info(f"  {domain} - Likely available (worth manual check)")
+            return 'available'
+            
+        # Default to taken if ambiguous (but log it)
+        if results['available'] > 0:
+            logger.warning(f"  {domain} - Ambiguous, marking as uncertain: {details}")
+            return 'uncertain'
+            
+        return 'taken'
     
     def generate_combinations(self, length, chars=string.ascii_lowercase + string.digits):
         """Generate domain combinations"""
@@ -370,6 +499,18 @@ class DomainHunter:
                     # Send notification if configured
                     self.send_notification(domain)
                 
+                elif status == 'uncertain':
+                    # Save for manual review
+                    uncertain_result = {
+                        'domain': domain,
+                        'length': current_length,
+                        'checked_at': str(datetime.now()),
+                        'status': 'uncertain'
+                    }
+                    self.uncertain_domains.append(uncertain_result)
+                    logger.info(f"❓ UNCERTAIN (check manually): {domain}")
+                    self.save_uncertain()
+                
                 elif status == 'premium':
                     logger.debug(f"Premium/Brokered: {domain}")
                 
@@ -412,6 +553,7 @@ class DomainHunter:
         logger.info("="*60)
         logger.info(f"Starting from: {self.state['current_length']} chars, TLD #{self.state['current_tld_index']}")
         logger.info(f"Previously found: {len(self.found_domains)} domains")
+        logger.info(f"Uncertain domains to review: {len(self.uncertain_domains)}")
         logger.info("="*60)
         
         try:
@@ -420,10 +562,12 @@ class DomainHunter:
             logger.error(f"Error in main loop: {e}")
             self.save_state()
             self.save_results()
+            self.save_uncertain()
             raise
         finally:
             self.save_state()
             self.save_results()
+            self.save_uncertain()
             logger.info("Hunter stopped.")
 
 if __name__ == "__main__":
