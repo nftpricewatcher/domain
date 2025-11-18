@@ -130,7 +130,11 @@ class DomainHunter:
                     return json.load(f)
             except:
                 pass
-        return []
+        # Create empty file if doesn't exist
+        empty_list = []
+        with open(self.results_file, 'w') as f:
+            json.dump(empty_list, f)
+        return empty_list
     
     def save_results(self):
         """Save found domains"""
@@ -145,7 +149,11 @@ class DomainHunter:
                     return json.load(f)
             except:
                 pass
-        return []
+        # Create empty file if doesn't exist
+        empty_list = []
+        with open(self.uncertain_file, 'w') as f:
+            json.dump(empty_list, f)
+        return empty_list
     
     def save_uncertain(self):
         """Save uncertain domains"""
@@ -162,8 +170,8 @@ class DomainHunter:
         except:
             return True  # Error = check with WHOIS
     
-    def direct_whois_check(self, domain):
-        """Direct WHOIS socket check"""
+    def direct_whois_check(self, domain, retry_count=0):
+        """Direct WHOIS socket check with rate limit detection"""
         try:
             tld = domain.split('.')[-1]
             whois_server = WHOIS_SERVERS.get(tld, f'whois.nic.{tld}')
@@ -185,48 +193,86 @@ class DomainHunter:
             resp_text = response.decode('utf-8', errors='ignore')
             resp_lower = resp_text.lower()
             
-            # Log the response for debugging
-            if len(resp_text.strip()) < 200:
-                logger.debug(f"WHOIS for {domain}: {resp_text.strip()[:100]}")
-            
-            # VERY SHORT or EMPTY response = likely available
-            if len(resp_text.strip()) < 50:
-                logger.debug(f"{domain} - Very short WHOIS response, marking as available")
-                return True
-            
-            # Clear indicators of availability
-            if any(x in resp_lower for x in [
-                'no data found', 'not found', 'no match', 'available',
-                'not registered', 'no entries found', 'status: free',
-                'domain not found', 'no matching record'
-            ]):
-                return True
-            
-            # Premium domain indicators
-            if any(x in resp_lower for x in ['premium', 'broker', 'aftermarket', 'reserved']):
-                return 'premium'
-                
-            # Check for registration data - if ANY of these exist, it's taken
-            registration_markers = [
-                'registrar:', 'creation date:', 'created:', 'registered:',
-                'expiry date:', 'expires:', 'updated:', 'name server:',
-                'registrant:', 'domain name:', 'registry domain id:'
+            # CRITICAL: Check for rate limiting indicators
+            rate_limit_indicators = [
+                'limit exceeded', 'too many requests', 'quota exceeded',
+                'try again later', 'blocked', 'rate limit', 'throttled',
+                'maximum queries', 'please wait', 'slow down'
             ]
             
-            if any(marker in resp_lower for marker in registration_markers):
-                return False
-                
-            # If response is short-ish with no registration data, likely available
-            if len(resp_text.strip()) < 150:
-                logger.debug(f"{domain} - Short WHOIS with no registration data, marking as available")
-                return True
-                
-            # Uncertain - log for review
-            logger.debug(f"{domain} - Uncertain WHOIS response length: {len(resp_text)}")
+            if any(indicator in resp_lower for indicator in rate_limit_indicators):
+                logger.warning(f"Rate limit detected for {domain}! Waiting...")
+                time.sleep(10)  # Wait 10 seconds
+                if retry_count < 2:
+                    return self.direct_whois_check(domain, retry_count + 1)
+                return None  # Can't determine
+            
+            # Check if we got a real response (not empty or error)
+            if len(resp_text.strip()) < 20:
+                logger.warning(f"{domain} - Suspiciously short WHOIS: '{resp_text.strip()}'")
+                # Too short to be real - might be rate limited
+                if retry_count < 1:
+                    time.sleep(5)
+                    return self.direct_whois_check(domain, retry_count + 1)
+                return None  # Can't trust this
+            
+            # Log full response for debugging false positives
+            logger.debug(f"WHOIS for {domain} ({len(resp_text)} chars): {resp_text[:200]}")
+            
+            # STRONG indicators it's TAKEN (if ANY of these exist)
+            taken_indicators = [
+                'registrar:', 'creation date:', 'created:', 'registered:',
+                'expiry date:', 'expires:', 'expire:', 'updated:', 'modified:',
+                'name server:', 'nameserver:', 'dns:', 'registrant:', 
+                'domain name:', 'registry domain id:', 'domain status:',
+                'whois server:', 'registry expiry', 'admin contact',
+                'tech contact', 'billing contact', 'registration date'
+            ]
+            
+            # If we find ANY registration data, it's definitely taken
+            for indicator in taken_indicators:
+                if indicator in resp_lower:
+                    logger.debug(f"{domain} is TAKEN - found '{indicator}'")
+                    return False
+            
+            # STRONG indicators it's AVAILABLE
+            available_indicators = [
+                'no data found', 'not found', 'no match', 
+                'no matching record', 'not registered', 'no entries found',
+                'status: free', 'domain not found', 'available for registration',
+                'no found', 'nothing found', 'not in database'
+            ]
+            
+            for indicator in available_indicators:
+                if indicator in resp_lower:
+                    logger.debug(f"{domain} appears AVAILABLE - found '{indicator}'")
+                    # But let's be cautious with short responses
+                    if len(resp_text) < 100:
+                        logger.warning(f"{domain} - Short 'not found' response, might be rate limited")
+                        return None  # Don't trust it
+                    return True
+            
+            # Premium/broker indicators
+            if any(x in resp_lower for x in ['premium', 'broker', 'aftermarket', 'reserved']):
+                return 'premium'
+            
+            # If response is substantial but has no registration data, be suspicious
+            if len(resp_text) > 200:
+                logger.warning(f"{domain} - Long response but no clear status")
+                return None  # Uncertain
+            
+            # Default to uncertain for safety
+            logger.debug(f"{domain} - Could not determine status from WHOIS")
             return None
             
+        except socket.timeout:
+            logger.warning(f"WHOIS timeout for {domain}")
+            if retry_count < 1:
+                time.sleep(2)
+                return self.direct_whois_check(domain, retry_count + 1)
+            return None
         except Exception as e:
-            logger.debug(f"WHOIS error for {domain}: {e}")
+            logger.error(f"WHOIS error for {domain}: {e}")
             return None
     
     def check_godaddy(self, domain):
@@ -314,29 +360,40 @@ class DomainHunter:
             return None
     
     def comprehensive_check(self, domain):
-        """Comprehensive check using multiple sources"""
+        """Comprehensive check using multiple sources - STRICT to avoid false positives"""
         results = {'available': 0, 'taken': 0, 'premium': 0, 'unknown': 0}
         details = []
+        sources_checked = 0
+        positive_sources = []
         
-        # 1. Direct WHOIS (most reliable for positive availability)
+        # 1. Direct WHOIS (most important)
         whois_result = self.direct_whois_check(domain)
+        sources_checked += 1
+        
         if whois_result == True:
-            results['available'] += 3  # Strong signal
+            results['available'] += 2  # Reduced weight
             details.append("WHOIS: available")
+            positive_sources.append("WHOIS")
         elif whois_result == 'premium':
             results['premium'] += 3
             details.append("WHOIS: premium")
-            logger.info(f"  {domain} - Premium domain detected")
             return 'premium'
         elif whois_result == False:
-            results['taken'] += 2  # Less weight since WHOIS can be wrong
+            results['taken'] += 5  # STRONG signal if WHOIS shows taken
             details.append("WHOIS: taken")
         else:
             results['unknown'] += 1
             details.append("WHOIS: unknown")
         
+        # If WHOIS clearly shows taken, don't bother checking more
+        if whois_result == False:
+            logger.debug(f"{domain} - WHOIS shows registration data, marking as TAKEN")
+            return 'taken'
+        
         # 2. GoDaddy check
         godaddy_result, price = self.check_godaddy(domain)
+        sources_checked += 1
+        
         if godaddy_result == 'premium':
             results['premium'] += 2
             details.append(f"GoDaddy: premium ${price}")
@@ -344,8 +401,9 @@ class DomainHunter:
         elif godaddy_result == True:
             results['available'] += 2
             details.append(f"GoDaddy: available ${price if price else '?'}")
+            positive_sources.append("GoDaddy")
         elif godaddy_result == False:
-            results['taken'] += 1  # Less weight
+            results['taken'] += 3
             details.append("GoDaddy: taken")
         else:
             results['unknown'] += 1
@@ -353,6 +411,8 @@ class DomainHunter:
         
         # 3. Namecheap check
         namecheap_result = self.check_namecheap(domain)
+        sources_checked += 1
+        
         if namecheap_result == 'premium':
             results['premium'] += 2
             details.append("Namecheap: premium")
@@ -360,8 +420,9 @@ class DomainHunter:
         elif namecheap_result == True:
             results['available'] += 2
             details.append("Namecheap: available")
+            positive_sources.append("Namecheap")
         elif namecheap_result == False:
-            results['taken'] += 1
+            results['taken'] += 3
             details.append("Namecheap: taken")
         else:
             results['unknown'] += 1
@@ -369,6 +430,8 @@ class DomainHunter:
         
         # 4. Porkbun check
         porkbun_result = self.check_porkbun(domain)
+        sources_checked += 1
+        
         if porkbun_result == 'premium':
             results['premium'] += 1
             details.append("Porkbun: premium")
@@ -376,45 +439,54 @@ class DomainHunter:
         elif porkbun_result == True:
             results['available'] += 2
             details.append("Porkbun: available")
+            positive_sources.append("Porkbun")
         elif porkbun_result == False:
-            results['taken'] += 1
+            results['taken'] += 3
             details.append("Porkbun: taken")
         else:
             results['unknown'] += 1
             details.append("Porkbun: unknown")
         
-        # Log details for debugging
+        # Log details
         logger.debug(f"{domain} - Scores: available={results['available']}, taken={results['taken']}, unknown={results['unknown']}")
         logger.debug(f"{domain} - Details: {', '.join(details)}")
+        logger.debug(f"{domain} - Positive sources: {positive_sources}")
         
-        # Decision logic - LESS CONSERVATIVE
-        if results['premium'] > 0:
-            return 'premium'
-            
-        # If WHOIS shows available and at least one other source agrees, it's available
-        if whois_result == True and results['available'] >= 5:
-            logger.info(f"  {domain} - Strong availability signal")
-            return 'available'
-            
-        # If multiple sources say available and taken signals are weak
-        if results['available'] >= 4 and results['taken'] <= 1:
-            logger.info(f"  {domain} - Multiple sources confirm availability")
-            return 'available'
-            
-        # If strongly taken
-        if results['taken'] >= 4:
+        # STRICT Decision logic to avoid false positives
+        
+        # If ANY source definitively shows taken, it's taken
+        if results['taken'] >= 3:
+            logger.debug(f"{domain} - Marked as TAKEN (score: {results['taken']})")
             return 'taken'
+        
+        # Need MULTIPLE sources to agree it's available
+        # And NO sources should say taken
+        if len(positive_sources) >= 3 and results['taken'] == 0:
+            # Triple verification for safety
+            logger.info(f"{domain} - {len(positive_sources)} sources say available, verifying...")
             
-        # If more available signals than taken
-        if results['available'] > results['taken'] and results['available'] >= 3:
-            logger.info(f"  {domain} - Likely available (worth manual check)")
-            return 'available'
-            
-        # Default to taken if ambiguous (but log it)
-        if results['available'] > 0:
-            logger.warning(f"  {domain} - Ambiguous, marking as uncertain: {details}")
+            # Do a second WHOIS check to be sure
+            time.sleep(2)
+            verify_result = self.direct_whois_check(domain)
+            if verify_result == True:
+                logger.info(f"{domain} - Verification passed! Sources: {', '.join(positive_sources)}")
+                return 'available'
+            else:
+                logger.warning(f"{domain} - Verification failed, marking as uncertain")
+                return 'uncertain'
+        
+        # If we have too many unknowns, we can't trust the result
+        if results['unknown'] >= 3:
+            logger.debug(f"{domain} - Too many unknown responses, marking as uncertain")
             return 'uncertain'
-            
+        
+        # If we have some positive signals but not enough confidence
+        if len(positive_sources) >= 1:
+            logger.debug(f"{domain} - Some positive signals but not enough confidence")
+            return 'uncertain'
+        
+        # Default to taken for safety
+        logger.debug(f"{domain} - No strong signals, defaulting to taken")
         return 'taken'
     
     def generate_combinations(self, length, chars=string.ascii_lowercase + string.digits):
@@ -425,6 +497,9 @@ class DomainHunter:
     def search_domains(self):
         """Main search loop"""
         logger.info("Starting domain hunt...")
+        
+        consecutive_finds = 0
+        last_find_time = 0
         
         while self.running:
             current_length = self.state['current_length']
@@ -481,6 +556,27 @@ class DomainHunter:
                 self.check_count += 1
                 
                 if status == 'available':
+                    # Check for suspicious consecutive finds
+                    current_time = time.time()
+                    if current_time - last_find_time < 30:  # Found within 30 seconds
+                        consecutive_finds += 1
+                        if consecutive_finds >= 2:
+                            logger.warning(f"⚠️ Found {consecutive_finds} domains rapidly - possible false positives!")
+                            logger.warning("Adding extra verification and cooldown...")
+                            time.sleep(30)  # Wait 30 seconds
+                            
+                            # Re-verify the domain
+                            logger.info(f"Re-verifying {domain}...")
+                            time.sleep(5)
+                            status = self.comprehensive_check(domain)
+                            if status != 'available':
+                                logger.warning(f"❌ {domain} failed re-verification, was a false positive")
+                                continue
+                    else:
+                        consecutive_finds = 0
+                    
+                    last_find_time = current_time
+                    
                     # Found one!
                     result = {
                         'domain': domain,
@@ -498,6 +594,9 @@ class DomainHunter:
                     
                     # Send notification if configured
                     self.send_notification(domain)
+                    
+                    # Extra delay after finding a domain to avoid rate limits
+                    time.sleep(5)
                 
                 elif status == 'uncertain':
                     # Save for manual review
@@ -525,8 +624,13 @@ class DomainHunter:
                     self.save_state()
                     self.last_save = time.time()
                 
-                # Rate limiting - adjust based on your needs
-                time.sleep(random.uniform(0.5, 1.5))
+                # Dynamic rate limiting based on recent activity
+                if consecutive_finds > 0:
+                    # Slower if we found domains recently (might be hitting limits)
+                    time.sleep(random.uniform(2.0, 4.0))
+                else:
+                    # Normal rate
+                    time.sleep(random.uniform(1.0, 2.0))
             
             # Move to next TLD
             self.state['current_tld_index'] += 1
