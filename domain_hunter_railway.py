@@ -74,15 +74,23 @@ class WhoisProxyRotator:
         # No hardcoded proxies - scrape fresh
         self.proxies = []
         
-        # Sources for scraping new proxies
+        # Sources for scraping new proxies (added reliable raw TXT from GitHub)
         self.proxy_sources = [
             'https://free-proxy-list.net/',
-            'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&country=all&anonymity=all&timeout=20000&limit=100',
+            'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&proxytype=http&country=all&anonymity=all&timeout=20000&limit=100',
             'https://www.proxy-list.download/api/v1/get?type=http',
             'https://geonode.com/free-proxy-list',
             'https://spys.one/en/http-proxy-list/',
             'https://www.sslproxies.org/',
-            'https://hidemy.name/en/proxy-list/'
+            'https://hidemy.name/en/proxy-list/',
+            'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+            'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
+            'https://raw.githubusercontent.com/monosans/proxy-scraper-checker/main/proxies/http.txt',
+            'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt',
+            'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt',
+            'https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt',
+            'https://raw.githubusercontent.com/saschazesiger/Free-Proxies/master/proxies/valid.txt',
+            'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP_RAW.txt',
         ]
         
         # Track service health
@@ -97,15 +105,24 @@ class WhoisProxyRotator:
         """Scrape and test new proxies from sources"""
         logger.info("Refreshing proxy list...")
         new_proxies = []
-        pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})'
+        plain_pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})'
+        html_pattern = r'<td>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})</td>\s*<td>(\d{1,5})</td>'
         
         for source in self.proxy_sources:
             try:
                 r = requests.get(source, timeout=15, verify=False)
                 if r.status_code == 200:
-                    found = re.findall(pattern, r.text)
+                    text = r.text
+                    # Try plain text extraction
+                    found = re.findall(plain_pattern, text)
                     for ip, port in found:
                         new_proxies.append(f"{ip}:{port}")
+                    
+                    # If few or none, try HTML table extraction
+                    if len(found) < 5:
+                        found_html = re.findall(html_pattern, text, re.IGNORECASE | re.MULTILINE)
+                        for ip, port in found_html:
+                            new_proxies.append(f"{ip}:{port}")
             except Exception as e:
                 logger.debug(f"Failed to scrape {source}: {e}")
         
@@ -204,7 +221,7 @@ class WhoisProxyRotator:
         except:
             return None
     
-    # Service implementation methods
+    # Service implementation methods - all kept, with improvements to key ones
     
     def check_whois_com(self, domain):
         """Check whois.com"""
