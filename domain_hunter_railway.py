@@ -74,23 +74,20 @@ class WhoisProxyRotator:
         # No hardcoded proxies - scrape fresh
         self.proxies = []
         
-        # Sources for scraping new proxies (added reliable raw TXT from GitHub)
+        # Better, faster sources (raw TXT for quick parsing, high quality)
         self.proxy_sources = [
-            'https://free-proxy-list.net/',
-            'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&proxytype=http&country=all&anonymity=all&timeout=20000&limit=100',
-            'https://www.proxy-list.download/api/v1/get?type=http',
-            'https://geonode.com/free-proxy-list',
-            'https://spys.one/en/http-proxy-list/',
-            'https://www.sslproxies.org/',
-            'https://hidemy.name/en/proxy-list/',
             'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
-            'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
-            'https://raw.githubusercontent.com/monosans/proxy-scraper-checker/main/proxies/http.txt',
             'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt',
+            'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
+            'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP_RAW.txt',
             'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt',
             'https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt',
-            'https://raw.githubusercontent.com/saschazesiger/Free-Proxies/master/proxies/valid.txt',
-            'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP_RAW.txt',
+            'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
+            'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&proxytype=http&country=all&anonymity=all&timeout=20000&limit=100',
+            'https://www.proxy-list.download/api/v1/get?type=http',
+            'https://free-proxy-list.net/',
+            'https://spys.one/en/http-proxy-list/',
+            'https://www.sslproxies.org/',
         ]
         
         # Track service health
@@ -126,12 +123,12 @@ class WhoisProxyRotator:
             except Exception as e:
                 logger.debug(f"Failed to scrape {source}: {e}")
         
-        # Deduplicate
-        new_proxies = list(set(new_proxies))
+        # Deduplicate and cap
+        new_proxies = list(set(new_proxies))[:200]  # Cap at 200 to speed up
         
-        # Test proxies in parallel
+        # Test proxies in parallel with lower workers
         good_proxies = []
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = [executor.submit(self.test_proxy, p) for p in new_proxies]
             for future in futures:
                 result = future.result()
@@ -147,7 +144,7 @@ class WhoisProxyRotator:
         """Test if proxy works"""
         try:
             proxies = {'http': f'http://{p}', 'https': f'https://{p}'}
-            r = requests.get('https://httpbin.org/ip', proxies=proxies, timeout=5, verify=False)
+            r = requests.get('https://httpbin.org/ip', proxies=proxies, timeout=3, verify=False)
             if r.status_code == 200:
                 return p
         except:
