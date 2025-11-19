@@ -232,13 +232,19 @@ class ServiceRotator:
     def check_domain(self, domain):
         """Check domain using best available service and connection method"""
         attempts = 0
-        max_attempts = 10
+        max_attempts = 15  # More attempts for accuracy
         results = []
+        services_used = []
         
         while attempts < max_attempts:
             service = self._get_best_service()
             if not service:
                 time.sleep(1)
+                attempts += 1
+                continue
+            
+            # Skip if we already used this exact service
+            if service['name'] in services_used:
                 attempts += 1
                 continue
             
@@ -274,16 +280,35 @@ class ServiceRotator:
                         status['proxy_needed'] = False
                         status['main_ip_failures'] = 0
                     
+                    services_used.append(service['name'])
                     results.append((result, service['name']))
                     
-                    # Check if we have consensus
-                    if len(results) >= 3:
-                        # All agree on taken?
-                        if all(r[0] == False for r in results):
-                            return 'taken'
-                        # All agree on available?
+                    # CRITICAL: If ANY service says taken, it's taken
+                    if result == False:
+                        logger.debug(f"{domain} marked as TAKEN by {service['name']}")
+                        return 'taken'
+                    
+                    # Need strong consensus for available (at least 4 agreeing)
+                    if len(results) >= 4:
                         if all(r[0] == True for r in results):
-                            return 'available'
+                            # Do one more verification with a different service
+                            verify_service = self._get_best_service()
+                            if verify_service and verify_service['name'] not in services_used:
+                                try:
+                                    verify_result = verify_service['func'](domain, proxy=self.proxy_manager.get_proxy())
+                                    if verify_result == False:
+                                        logger.debug(f"{domain} failed verification by {verify_service['name']}")
+                                        return 'taken'
+                                    elif verify_result == True:
+                                        logger.info(f"✓ {domain} VERIFIED by {len(results)+1} services")
+                                        return 'available'
+                                except:
+                                    pass
+                            
+                            # If we can't verify but have 4+ positive, need more checks
+                            if len(results) >= 5 and all(r[0] == True for r in results):
+                                logger.info(f"✓ {domain} confirmed by {len(results)} services")
+                                return 'available'
                     
                 else:
                     # Got response but unclear
@@ -303,25 +328,28 @@ class ServiceRotator:
             
             attempts += 1
             
-            # Don't wait if we're getting results
-            if results:
-                time.sleep(0.1)
-            else:
-                time.sleep(0.3)
+            # Small delay between checks
+            time.sleep(0.2)
         
-        # Make decision based on what we got
+        # If we got here without a decision, be conservative
+        # We need at least some positive results to consider available
         if not results:
-            return 'taken'  # Conservative
+            return 'taken'  # No data = assume taken
         
+        # Count results
         true_count = sum(1 for r, _ in results if r == True)
         false_count = sum(1 for r, _ in results if r == False)
         
+        # ANY false = taken
         if false_count > 0:
             return 'taken'
-        if true_count >= 2:
-            return 'available'
         
-        return 'taken'  # Conservative
+        # Need at least 3 positive to consider available
+        if true_count >= 3:
+            logger.debug(f"{domain} has {true_count} positive results but not enough verification")
+            # Could be available but not certain enough
+        
+        return 'taken'  # Default conservative
     
     def _get_best_service(self):
         """Get the best available service"""
