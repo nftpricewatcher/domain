@@ -12,7 +12,7 @@ import signal
 import sys
 import warnings
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import re
 
 warnings.filterwarnings('ignore')
@@ -24,9 +24,6 @@ try:
 except:
     print("ERROR: requests module required. Install with: pip install requests")
     sys.exit(1)
-
-# Import our proxy scraper
-from proxy_scraper import ProxyScraper
 
 # Setup logging
 log_level = os.environ.get('LOG_LEVEL', 'INFO')
@@ -45,6 +42,154 @@ PRIORITY_TLDS = [
     'io', 'ai', 'me', 'co', 'to', 'so', 'sh', 'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
     'com', 'net', 'org', 'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
 ]
+
+class ProxyScraper:
+    """Continuously scrapes, tests, and maintains a pool of working proxies"""
+    
+    def __init__(self, max_proxies=100):
+        self.working_proxies = []
+        self.tested_proxies = {}
+        self.proxy_lock = threading.Lock()
+        self.max_proxies = max_proxies
+        self.running = True
+        
+        self.scraper_thread = threading.Thread(target=self._scraper_loop, daemon=True)
+        self.tester_thread = threading.Thread(target=self._tester_loop, daemon=True)
+        
+        self.scraper_thread.start()
+        self.tester_thread.start()
+        
+        logger.info("Proxy scraper initialized and running in background")
+    
+    def get_proxy(self):
+        with self.proxy_lock:
+            if self.working_proxies:
+                return random.choice(self.working_proxies)
+        return None
+    
+    def _scraper_loop(self):
+        while self.running:
+            try:
+                logger.info("Starting proxy scraping round...")
+                new_proxies = self._scrape_all_sources()
+                logger.info(f"Found {len(new_proxies)} potential proxies")
+                
+                for proxy in new_proxies:
+                    if proxy not in self.tested_proxies:
+                        self.tested_proxies[proxy] = 0
+                
+                time.sleep(300)
+                
+            except Exception as e:
+                logger.error(f"Error in scraper loop: {e}")
+                time.sleep(60)
+    
+    def _tester_loop(self):
+        while self.running:
+            try:
+                current_time = time.time()
+                
+                to_test = []
+                for proxy, last_test in self.tested_proxies.items():
+                    if current_time - last_test > 300:
+                        to_test.append(proxy)
+                
+                if to_test:
+                    logger.debug(f"Testing {len(to_test)} proxies...")
+                    
+                    with ThreadPoolExecutor(max_workers=20) as executor:
+                        futures = {executor.submit(self._test_proxy, proxy): proxy for proxy in to_test[:50]}
+                        
+                        for future in futures:
+                            proxy = futures[future]
+                            try:
+                                if future.result():
+                                    with self.proxy_lock:
+                                        if proxy not in self.working_proxies:
+                                            self.working_proxies.append(proxy)
+                                            logger.info(f"Added working proxy: {proxy}")
+                                else:
+                                    with self.proxy_lock:
+                                        if proxy in self.working_proxies:
+                                            self.working_proxies.remove(proxy)
+                            except:
+                                pass
+                            
+                            self.tested_proxies[proxy] = current_time
+                    
+                    with self.proxy_lock:
+                        if len(self.working_proxies) > self.max_proxies:
+                            self.working_proxies = self.working_proxies[-self.max_proxies:]
+                    
+                    logger.info(f"Currently have {len(self.working_proxies)} working proxies")
+                
+                time.sleep(30)
+                
+            except Exception as e:
+                logger.error(f"Error in tester loop: {e}")
+                time.sleep(30)
+    
+    def _test_proxy(self, proxy):
+        try:
+            proxies = {
+                'http': f'http://{proxy}',
+                'https': f'http://{proxy}'
+            }
+            
+            response = requests.get(
+                'http://httpbin.org/ip',
+                proxies=proxies,
+                timeout=5,
+                verify=False
+            )
+            
+            if response.status_code == 200:
+                return True
+                
+        except:
+            pass
+        
+        return False
+    
+    def _scrape_all_sources(self):
+        all_proxies = set()
+        
+        api_urls = [
+            'https://www.proxy-list.download/api/v1/get?type=http',
+            'https://www.proxyscan.io/download?type=http',
+            'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
+            'https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt',
+            'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
+            'https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt',
+            'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
+            'https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt',
+            'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt',
+            'https://raw.githubusercontent.com/opsxcq/proxy-list/master/list.txt',
+            'https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt',
+            'https://api.proxyscrape.com/v2/?request=get&protocol=http',
+            'https://api.openproxylist.xyz/http.txt',
+            'http://worm.rip/http.txt',
+            'https://proxyspace.pro/http.txt'
+        ]
+        
+        for url in api_urls:
+            try:
+                response = requests.get(url, timeout=5)
+                if response.status_code == 200:
+                    proxies = re.findall(r'\d+\.\d+\.\d+\.\d+:\d+', response.text)
+                    all_proxies.update(proxies)
+            except:
+                continue
+        
+        return list(all_proxies)
+    
+    def get_stats(self):
+        with self.proxy_lock:
+            return {
+                'working': len(self.working_proxies),
+                'total_tested': len(self.tested_proxies),
+                'proxies': self.working_proxies[:10]
+            }
 
 class WhoisProxyRotator:
     """Rotates through multiple WHOIS services to avoid rate limits"""
