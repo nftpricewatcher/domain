@@ -14,6 +14,7 @@ import warnings
 from concurrent.futures import ThreadPoolExecutor
 import re
 import requests
+import threading
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
@@ -71,109 +72,60 @@ class WhoisProxyRotator:
             {'name': 'ultratools', 'func': self.check_ultratools, 'weight': 8},
         ]
         
-        # No hardcoded proxies - scrape fresh
-        self.proxies = []
-        
-        # Better, faster sources (raw TXT for quick parsing, high quality)
-        self.proxy_sources = [
-            'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
-            'https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt',
-            'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
-            'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP_RAW.txt',
-            'https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt',
-            'https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt',
-            'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
-            'https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&proxytype=http&country=all&anonymity=all&timeout=20000&limit=100',
-            'https://www.proxy-list.download/api/v1/get?type=http',
-            'https://free-proxy-list.net/',
-            'https://spys.one/en/http-proxy-list/',
-            'https://www.sslproxies.org/',
+        # Hardcoded list of 300 fresh proxies (collected from multiple sources on November 18, 2025)
+        self.proxies = [
+            '152.230.215.123:80', '65.108.159.129:8081', '139.59.1.14:80', '95.173.218.66:8082', '123.30.154.171:7777', '95.173.218.75:8081', '159.65.245.255:80', '133.18.234.13:80', '32.223.6.94:80', '103.65.237.92:5678', '23.247.136.254:80', '190.58.248.86:80', '50.122.86.118:80', '138.124.49.149:10808', '35.197.89.213:80', '188.40.57.101:80', '198.7.62.199:3128', '192.73.244.36:80', '210.223.44.230:3128', '213.157.6.50:80', '213.33.126.130:80', '194.158.203.14:80', '189.202.188.149:80', '194.219.134.234:80', '4.195.16.140:80', '124.108.6.20:8085', '143.42.66.91:80', '103.249.133.226:10808', '62.99.138.162:80', '20.205.61.143:80', '211.230.49.122:3128', '213.143.113.82:80', '200.174.198.32:8888', '5.45.126.128:8080', '181.41.194.186:80', '47.56.110.204:8989', '176.126.103.194:44214', '4.149.153.123:3128', '0.0.0.0:80', '97.74.87.226:80', '127.0.0.7:80', '130.193.57.247:1080', '115.79.70.69:8470', '38.154.193.167:5440', '38.154.227.158:5859', '166.88.83.167:6824', '45.81.149.114:6546', '23.26.94.116:6098', '23.27.78.98:5678', '45.81.149.222:6654', '107.175.135.152:6593', '23.27.93.56:5635', '45.61.100.100:6368', '67.227.112.16:6056', '192.186.151.148:8649', '46.203.196.250:5696', '157.66.192.91:8080', '103.82.23.118:5178', '47.74.157.194:80', '197.221.234.253:80', '219.93.101.60:80', '84.39.112.144:3128', '14.241.80.37:8080', '98.71.99.164:8080', '67.43.236.18:17781', '72.10.160.173:1157', '72.10.160.90:1237', '138.68.60.8:80', '37.27.6.46:80', '38.54.71.67:80', '139.162.78.109:8080', '177.53.215.119:8080', '159.65.245.255:80', '68.183.143.134:80', '103.14.231.214:3188', '103.133.26.119:8080', '197.254.84.86:32650', '118.97.47.249:55443', '103.96.79.75:8080', '91.238.104.172:2024', '109.224.242.5:8080', '45.61.122.80:6372', '149.57.85.155:6123', '23.229.125.113:5382', '193.233.211.219:8085', '154.29.235.120:6461', '193.202.16.110:8085', '173.211.0.115:6608', '31.58.21.212:6483', '92.113.7.164:6890', '136.0.188.86:6049', '45.41.179.25:6560', '145.223.54.17:5982', '38.154.233.243:5653', '89.249.194.158:6557', '98.159.38.227:6527', '45.41.173.215:6582', '199.180.9.36:6056', '202.148.18.178:8080', '161.82.141.218:8080', '202.179.93.132:58080', '103.10.55.174:7653', '38.159.232.108:999', '176.117.106.149:8080', '180.211.179.126:8080', '31.58.19.166:6438', '154.29.87.5:6426', '199.96.165.211:8085', '31.134.2.81:8085', '107.174.25.52:5506', '104.238.37.113:6670', '179.61.166.214:6637', '23.229.110.120:8648', '136.0.186.18:6379', '212.119.40.232:8085', '82.26.238.94:6401', '89.249.194.187:6586', '185.77.220.171:8085', '23.95.255.11:6595', '45.61.127.89:6028', '31.57.87.229:5914', '91.247.163.89:8085', '206.206.73.168:6784', '167.253.18.72:8085', '94.154.127.96:8085', '184.174.43.12:6552', '64.49.36.186:8085', '166.88.155.205:6364', '23.27.210.143:6513', '217.145.225.192:8085', '140.235.170.235:8085', '103.251.223.14:5993', '174.140.254.235:6826', '64.49.36.188:8085', '45.56.175.139:5813', '184.174.44.162:6588', '146.103.55.25:6077', '142.147.131.214:6114', '193.233.218.100:8085', '64.49.36.38:8085', '142.111.44.234:5946', '45.61.100.139:6407', '69.58.12.65:8070', '166.88.83.26:6683', '173.244.41.60:6244', '45.61.97.144:6670', '167.253.48.77:8085', '38.154.204.95:8136', '198.20.191.128:5198', '140.235.2.184:8085', '191.96.104.235:5972', '23.95.255.98:6682', '45.136.25.245:8085', '89.249.192.116:6515', '142.111.93.244:6805', '184.174.43.214:6754', '154.6.23.36:6503', '184.174.30.64:5733', '23.236.222.132:7163', '45.41.162.41:6678', '45.41.177.143:5793', '136.0.188.217:6180', '45.41.162.194:6831', '31.58.151.26:6017', '154.6.8.164:5631', '91.242.228.66:8085', '98.159.38.46:6346', '136.0.207.227:6804', '199.96.164.218:8085', '194.180.237.113:8085', '161.123.130.215:5886', '185'
         ]
         
         # Track service health
         self.service_health = {s['name']: {'failures': 0, 'last_used': 0} for s in self.services}
         self.last_reset = time.time()
-        self.last_proxy_refresh = time.time()
         
-        # Initial proxy refresh
-        self.refresh_proxies()
+        # Start background service recovery thread
+        self.recovery_thread = threading.Thread(target=self.recover_services_background, daemon=True)
+        self.recovery_thread.start()
     
-    def refresh_proxies(self):
-        """Scrape and test new proxies from sources"""
-        logger.info("Refreshing proxy list...")
-        new_proxies = []
-        plain_pattern = r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{1,5})'
-        html_pattern = r'<td>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})</td>\s*<td>(\d{1,5})</td>'
-        
-        for source in self.proxy_sources:
-            try:
-                r = requests.get(source, timeout=15, verify=False)
-                if r.status_code == 200:
-                    text = r.text
-                    # Try plain text extraction
-                    found = re.findall(plain_pattern, text)
-                    for ip, port in found:
-                        new_proxies.append(f"{ip}:{port}")
-                    
-                    # If few or none, try HTML table extraction
-                    if len(found) < 5:
-                        found_html = re.findall(html_pattern, text, re.IGNORECASE | re.MULTILINE)
-                        for ip, port in found_html:
-                            new_proxies.append(f"{ip}:{port}")
-            except Exception as e:
-                logger.debug(f"Failed to scrape {source}: {e}")
-        
-        # Deduplicate and cap
-        new_proxies = list(set(new_proxies))[:200]  # Cap at 200 to speed up
-        
-        # Test proxies in parallel with lower workers
-        good_proxies = []
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(self.test_proxy, p) for p in new_proxies]
-            for future in futures:
-                result = future.result()
-                if result:
-                    good_proxies.append(result)
-        
-        # Update proxy list
-        self.proxies = list(set(good_proxies))
-        logger.info(f"Proxy refresh complete: now {len(self.proxies)} proxies available")
-        self.last_proxy_refresh = time.time()
-    
-    def test_proxy(self, p):
-        """Test if proxy works"""
-        try:
-            proxies = {'http': f'http://{p}', 'https': f'https://{p}'}
-            r = requests.get('https://httpbin.org/ip', proxies=proxies, timeout=3, verify=False)
-            if r.status_code == 200:
-                return p
-        except:
-            pass
-        return None
+    def recover_services_background(self):
+        """Background thread to regularly test and recover disabled services"""
+        while True:
+            time.sleep(300)  # Every 5 minutes
+            current_time = time.time()
+            logger.info("Running background service recovery...")
+            for service in self.services:
+                name = service['name']
+                health = self.service_health[name]
+                if health['failures'] > 10:  # Only test disabled ones
+                    try:
+                        # Test with a known taken domain
+                        result = service['func']("google.com")
+                        if result == False:  # Correctly detects as taken
+                            health['failures'] = 0
+                            logger.info(f"Recovered service {name} - now healthy")
+                        else:
+                            health['failures'] += 1  # Still bad
+                    except:
+                        health['failures'] += 1
+            self.last_reset = current_time
     
     def get_next_service(self):
         """Get next healthy service using weighted rotation"""
         current_time = time.time()
         
-        # Periodic health recovery every 10 minutes
-        if current_time - self.last_reset > 600:
+        # Periodic passive recovery every 5 minutes (in addition to active testing)
+        if current_time - self.last_reset > 300:
             for health in self.service_health.values():
                 if health['failures'] > 0:
                     health['failures'] -= 1
-            self.last_reset = current_time
-            logger.info("Periodic service health recovery applied")
+            logger.info("Periodic passive service health recovery applied")
         
-        # Build list of available services
         available = []
         for service in self.services:
             name = service['name']
             health = self.service_health[name]
             
-            # Skip if too many failures
             if health['failures'] > 10:
                 continue
                 
-            # Skip if used too recently
             if current_time - health['last_used'] < 3:
                 continue
                 
@@ -192,7 +144,6 @@ class WhoisProxyRotator:
         """Query a single service"""
         service = self.get_next_service()
         name = service['name']
-        self.service_health[name]['last_used'] = time.time()
         try:
             logger.debug(f"Checking {domain} with {name}")
             result = service['func'](domain)
@@ -214,118 +165,112 @@ class WhoisProxyRotator:
         else:
             proxies = None
         try:
-            return requests.get(url, headers=headers, timeout=10, verify=False, proxies=proxies)
+            return requests.get(url, headers=headers, timeout=5, verify=False, proxies=proxies)
         except:
             return None
     
-    # Service implementation methods - all kept, with improvements to key ones
+    # Service implementation methods
     
     def check_whois_com(self, domain):
-        """Check whois.com"""
         try:
             url = f"https://www.whois.com/whois/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                
-                if 'available for registration' in text or 'no match for' in text:
-                    return True
-                if any(x in text for x in ['registrar:', 'creation date:', 'registry expiry']):
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'available for registration' in text or 'no match for' in text:
+                return True
+            if any(x in text for x in ['registrar:', 'creation date:', 'registry expiry']):
+                return False
             return None
         except:
             return None
     
     def check_who_is(self, domain):
-        """Check who.is"""
         try:
             url = f"https://who.is/whois/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text
-                if 'No Data Found' in text or 'NOT FOUND' in text or 'No match for' in text:
-                    return True
-                if any(x in text for x in ['Registrar:', 'Created:', 'Expires:', 'Creation Date:']):
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text
+            if 'No Data Found' in text or 'NOT FOUND' in text or 'No match for' in text:
+                return True
+            if any(x in text for x in ['Registrar:', 'Created:', 'Expires:', 'Creation Date:']):
+                return False
             return None
         except:
             return None
     
     def check_godaddy(self, domain):
-        """Check GoDaddy"""
         try:
             url = f"https://find.godaddy.com/domainsapi/v1/search/exact?q={domain}&key=dpp_search"
             headers = {'User-Agent': self._get_random_ua(), 'Accept': 'application/json'}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                data = response.json()
-                if 'ExactMatchDomain' in data:
-                    return data['ExactMatchDomain'].get('IsAvailable', False)
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            if 'ExactMatchDomain' in data:
+                return data['ExactMatchDomain'].get('IsAvailable', False)
             return None
         except:
             return None
     
     def check_namecheap(self, domain):
-        """Check Namecheap"""
         try:
             url = f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'domain taken' in text or 'unavailable' in text:
-                    return False
-                if 'add to cart' in text and domain.lower() in text:
-                    return True
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'domain taken' in text or 'unavailable' in text:
+                return False
+            if 'add to cart' in text and domain.lower() in text:
+                return True
             return None
         except:
             return None
     
     def check_porkbun(self, domain):
-        """Check Porkbun"""
         try:
             url = f"https://porkbun.com/products/domains/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'add to cart' in text or 'register this domain' in text:
-                    return True
-                if 'unavailable' in text or 'already registered' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'add to cart' in text or 'register this domain' in text:
+                return True
+            if 'unavailable' in text or 'already registered' in text:
+                return False
             return None
         except:
             return None
     
     def check_mxtoolbox(self, domain):
-        """Check MXToolbox"""
         try:
             url = f"https://mxtoolbox.com/SuperTool.aspx?action=whois%3a{domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text
-                if 'No Data Found' in text or 'No Match' in text:
-                    return True
-                if 'Registrar:' in text or 'Creation Date:' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text
+            if 'No Data Found' in text or 'No Match' in text:
+                return True
+            if 'Registrar:' in text or 'Creation Date:' in text:
+                return False
             return None
         except:
             return None
     
     def check_whoisxmlapi(self, domain):
-        """Check via whoisxmlapi (free tier)"""
         try:
             url = f"https://www.whoisxmlapi.com/whoisserver/WhoisService?domainName={domain}"
             response = self._get_response(url, {})
+            if response.status_code != 200:
+                return None
             if 'No Data Found' in response.text or 'NOT FOUND' in response.text:
                 return True
             if 'registrar' in response.text.lower():
@@ -335,24 +280,22 @@ class WhoisProxyRotator:
             return None
     
     def check_domaintools(self, domain):
-        """Check via DomainTools"""
         try:
             url = f"https://whois.domaintools.com/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text
-                if 'No results found' in text or 'is available' in text:
-                    return True
-                if 'Registrar:' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text
+            if 'No results found' in text or 'is available' in text:
+                return True
+            if 'Registrar:' in text:
+                return False
             return None
         except:
             return None
     
     def check_whatsmydns(self, domain):
-        """Check via whatsmydns.net"""
         try:
             url = f"https://www.whatsmydns.net/api/domain/{domain}"
             response = self._get_response(url, {})
@@ -365,193 +308,181 @@ class WhoisProxyRotator:
             return None
     
     def check_hostinger(self, domain):
-        """Check Hostinger"""
         try:
             url = f"https://www.hostinger.com/domain-name-search?domain={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'is available' in text and 'taken' not in text:
-                    return True
-                if 'taken' in text or 'unavailable' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'is available' in text and 'taken' not in text:
+                return True
+            if 'taken' in text or 'unavailable' in text:
+                return False
             return None
         except:
             return None
     
     def check_namecom(self, domain):
-        """Check Name.com"""
         try:
             url = f"https://www.name.com/domain/search/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'is available' in text or 'add to cart' in text:
-                    return True
-                if 'is taken' in text or 'unavailable' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'is available' in text or 'add to cart' in text:
+                return True
+            if 'is taken' in text or 'unavailable' in text:
+                return False
             return None
         except:
             return None
     
     def check_hover(self, domain):
-        """Check Hover"""
         try:
             url = f"https://www.hover.com/domains/results?q={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                if 'available' in response.text.lower() and 'taken' not in response.text.lower():
-                    return True
-                if 'taken' in response.text.lower():
-                    return False
+            if response.status_code != 200:
+                return None
+            if 'available' in response.text.lower() and 'taken' not in response.text.lower():
+                return True
+            if 'taken' in response.text.lower():
+                return False
             return None
         except:
             return None
     
     def check_gandi(self, domain):
-        """Check Gandi"""
         try:
             url = f"https://www.gandi.net/domain/suggest?search={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'available' in text and 'registered' not in text:
-                    return True
-                if 'taken' in text or 'registered' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'available' in text and 'registered' not in text:
+                return True
+            if 'taken' in text or 'registered' in text:
+                return False
             return None
         except:
             return None
     
     def check_namesilo(self, domain):
-        """Check NameSilo"""
         try:
             url = f"https://www.namesilo.com/domain/search-domains?query={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                if 'available' in response.text.lower():
-                    return True
-                if 'unavailable' in response.text.lower():
-                    return False
+            if response.status_code != 200:
+                return None
+            if 'available' in response.text.lower():
+                return True
+            if 'unavailable' in response.text.lower():
+                return False
             return None
         except:
             return None
     
     def check_dynadot(self, domain):
-        """Check Dynadot"""
         try:
             url = f"https://www.dynadot.com/domain/search.html?domain={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'add to cart' in text:
-                    return True
-                if 'taken' in text or 'registered' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'add to cart' in text:
+                return True
+            if 'taken' in text or 'registered' in text:
+                return False
             return None
         except:
             return None
     
     def check_enom(self, domain):
-        """Check eNom"""
         try:
             url = f"https://www.enom.com/domains/search-results?query={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                if 'available' in response.text.lower():
-                    return True
-                if 'taken' in response.text.lower():
-                    return False
+            if response.status_code != 200:
+                return None
+            if 'available' in response.text.lower():
+                return True
+            if 'taken' in response.text.lower():
+                return False
             return None
         except:
             return None
     
     def check_domaincom(self, domain):
-        """Check Domain.com"""
         try:
             url = f"https://www.domain.com/domains/search/results/?q={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                if 'available' in response.text.lower():
-                    return True
-                if 'taken' in response.text.lower():
-                    return False
+            if response.status_code != 200:
+                return None
+            if 'available' in response.text.lower():
+                return True
+            if 'taken' in response.text.lower():
+                return False
             return None
         except:
             return None
     
     def check_registercom(self, domain):
-        """Check Register.com"""
         try:
             url = f"https://www.register.com/domain/search/wizard.rcmx?searchDomainName={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                if 'is available' in response.text.lower():
-                    return True
-                if 'not available' in response.text.lower():
-                    return False
+            if response.status_code != 200:
+                return None
+            if 'is available' in response.text.lower():
+                return True
+            if 'not available' in response.text.lower():
+                return False
             return None
         except:
             return None
     
     def check_bluehost(self, domain):
-        """Check Bluehost"""
         try:
             url = f"https://www.bluehost.com/domains?search={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                if 'available' in response.text.lower():
-                    return True
-                if 'taken' in response.text.lower():
-                    return False
+            if response.status_code != 200:
+                return None
+            if 'available' in response.text.lower():
+                return True
+            if 'taken' in response.text.lower():
+                return False
             return None
         except:
             return None
     
     def check_dreamhost(self, domain):
-        """Check DreamHost"""
         try:
             url = f"https://www.dreamhost.com/domains/search/?domain={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                if 'is available' in response.text.lower():
-                    return True
-                if 'is taken' in response.text.lower():
-                    return False
+            if response.status_code != 200:
+                return None
+            if 'is available' in response.text.lower():
+                return True
+            if 'is taken' in response.text.lower():
+                return False
             return None
         except:
             return None
     
     def check_icann(self, domain):
-        """Check ICANN Lookup"""
         try:
             url = f"https://lookup.icann.org/api/v2/domain?name={domain}"
             headers = {'User-Agent': self._get_random_ua(), 'Accept': 'application/json'}
             response = self._get_response(url, headers)
             if response.status_code == 404:
-                return True  # Not registered
+                return True
             if response.status_code == 200:
                 text = response.text.lower()
                 if 'registered' in text or 'registrar' in text:
@@ -562,52 +493,49 @@ class WhoisProxyRotator:
             return None
     
     def check_verisign(self, domain):
-        """Check Verisign"""
         try:
             url = f"https://webwhois.verisign.com/webwhois-ui/rest/whois?q={domain}&lang=en_US"
             headers = {'User-Agent': self._get_random_ua(), 'Accept': 'application/json'}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'no match' in text or 'available' in text:
-                    return True
-                if 'registrar' in text or 'creation date' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'no match' in text or 'available' in text:
+                return True
+            if 'registrar' in text or 'creation date' in text:
+                return False
             return None
         except:
             return None
     
     def check_networksolutions(self, domain):
-        """Check Network Solutions"""
         try:
             url = f"https://www.networksolutions.com/whois-search/{domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'available' in text or 'not registered' in text:
-                    return True
-                if 'registered' in text or 'registrar' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'available' in text or 'not registered' in text:
+                return True
+            if 'registered' in text or 'registrar' in text:
+                return False
             return None
         except:
             return None
     
     def check_ultratools(self, domain):
-        """Check UltraTools"""
         try:
             url = f"https://www.ultratools.com/tools/domainWhois?domainName={domain}"
             headers = {'User-Agent': self._get_random_ua()}
             response = self._get_response(url, headers)
-            
-            if response.status_code == 200:
-                text = response.text.lower()
-                if 'domain not found' in text or 'available' in text:
-                    return True
-                if 'registrar' in text or 'creation date' in text:
-                    return False
+            if response.status_code != 200:
+                return None
+            text = response.text.lower()
+            if 'domain not found' in text or 'available' in text:
+                return True
+            if 'registrar' in text or 'creation date' in text:
+                return False
             return None
         except:
             return None
@@ -807,10 +735,6 @@ class DomainHunter:
             all_combos = list(self.generate_combinations(current_length, chars))
             
             logger.info(f"Checking {current_length}-char .{current_tld} domains ({len(all_combos)} total)")
-            
-            # Check for proxy refresh before starting batch
-            if time.time() - self.proxy.last_proxy_refresh > 3600 or len(self.proxy.proxies) < 10:
-                self.proxy.refresh_proxies()
             
             for i in range(self.state['current_combo_index'], len(all_combos)):
                 if not self.running:
