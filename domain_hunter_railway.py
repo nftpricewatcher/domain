@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Priority TLDs
 PRIORITY_TLDS = [
-    'io', 'ai', 'me', 'co', 'to', 'so', 'sh', 'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
+    'me', 'co', 'to', 'so', 'sh', 'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
     'com', 'net', 'org', 'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
 ]
 
@@ -311,25 +311,35 @@ class ServiceRotator:
                                 return 'available'
                     
                 else:
-                    # Got response but unclear
+                    # Got response but unclear - this is still a failure
                     status['consecutive_failures'] += 1
                     
+                    if not use_proxy:
+                        status['main_ip_failures'] += 1
+                        if status['main_ip_failures'] >= 2:
+                            status['proxy_needed'] = True
+                            status['main_ip_last_fail'] = time.time()
+                            logger.debug(f"{service['name']} switching to proxy - unclear response on main IP")
+                    
             except Exception as e:
-                # Failed
+                # Failed completely
                 status['consecutive_failures'] += 1
                 
                 if not use_proxy:
                     # Main IP failed
                     status['main_ip_failures'] += 1
-                    if status['main_ip_failures'] >= 2:
+                    if status['main_ip_failures'] >= 1:  # Switch faster on hard failures
                         status['proxy_needed'] = True
                         status['main_ip_last_fail'] = time.time()
-                        logger.debug(f"{service['name']} now needs proxy")
+                        logger.debug(f"{service['name']} switching to proxy - exception on main IP: {str(e)[:50]}")
             
             attempts += 1
             
-            # Small delay between checks
-            time.sleep(0.2)
+            # Minimal delay between checks when healthy
+            if not use_proxy and status['consecutive_failures'] < 2:
+                time.sleep(0.05)  # Fast when main IP is working
+            else:
+                time.sleep(0.2)  # Slower when struggling
         
         # If we got here without a decision, be conservative
         # We need at least some positive results to consider available
@@ -361,6 +371,11 @@ class ServiceRotator:
             
             # Skip if recently failed badly
             if status['consecutive_failures'] > 5:
+                # Force proxy mode if failing a lot
+                if status['consecutive_failures'] > 3 and not status['proxy_needed']:
+                    status['proxy_needed'] = True
+                    status['main_ip_last_fail'] = current_time
+                    logger.debug(f"{service['name']} switching to proxy mode due to failures")
                 continue
             
             # Add based on weight and health
@@ -370,9 +385,12 @@ class ServiceRotator:
         if available:
             return random.choice(available)
         
-        # All services down? Force reset
-        logger.warning("All services down, forcing reset")
-        for status in self.service_status.values():
+        # All services down? Force reset and switch some to proxies
+        logger.warning("All services down, forcing reset and proxy mode")
+        for name, status in self.service_status.items():
+            if status['consecutive_failures'] > 2:
+                status['proxy_needed'] = True
+                status['main_ip_last_fail'] = current_time
             status['consecutive_failures'] = max(0, status['consecutive_failures'] - 3)
         
         return random.choice(self.services)
