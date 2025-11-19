@@ -705,8 +705,8 @@ class ServiceRotator:
 
 class DomainHunter:
     def __init__(self):
-        self.state_file = 'hunter_state.json'
-        self.results_file = 'found_domains.json'
+        self.state_file = '/data/hunter_state.json'
+        self.results_file = '/data/found_domains.json'
         self.state = self.load_state()
         self.found_domains = self.load_results()
         self.running = True
