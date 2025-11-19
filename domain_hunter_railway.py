@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Priority TLDs
 PRIORITY_TLDS = [
-    'me', 'co', 'to', 'so', 'sh', 'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
+    'io', 'ai', 'me', 'co', 'to', 'so', 'sh', 'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
     'com', 'net', 'org', 'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
 ]
 
@@ -230,136 +230,123 @@ class ServiceRotator:
             }
     
     def check_domain(self, domain):
-        """Check domain using best available service and connection method"""
-        attempts = 0
-        max_attempts = 15  # More attempts for accuracy
-        results = []
-        services_used = []
-        
-        while attempts < max_attempts:
-            service = self._get_best_service()
-            if not service:
-                time.sleep(1)
-                attempts += 1
-                continue
-            
-            # Skip if we already used this exact service
-            if service['name'] in services_used:
-                attempts += 1
-                continue
-            
+        """Check domain using parallel service checks for speed"""
+        # Get available services
+        available_services = []
+        for service in self.services:
             status = self.service_status[service['name']]
-            
-            # Decide whether to use proxy or main IP
-            use_proxy = False
-            proxy = None
-            
-            if status['proxy_needed']:
-                # This service needs proxy for now
-                proxy = self.proxy_manager.get_proxy()
-                if proxy:
-                    use_proxy = True
-                else:
-                    # No proxy available, skip if main IP is failing
-                    if status['consecutive_failures'] > 2:
-                        attempts += 1
-                        continue
-            
-            # Try the check
-            try:
-                result = service['func'](domain, proxy=proxy if use_proxy else None)
-                
-                if result is not None:
-                    # Success!
-                    status['consecutive_failures'] = 0
-                    status['total_successes'] += 1
-                    status['last_success'] = time.time()
-                    
-                    # If we used main IP successfully, mark it as working
-                    if not use_proxy:
-                        status['proxy_needed'] = False
-                        status['main_ip_failures'] = 0
-                    
-                    services_used.append(service['name'])
-                    results.append((result, service['name']))
-                    
-                    # CRITICAL: If ANY service says taken, it's taken
-                    if result == False:
-                        logger.debug(f"{domain} marked as TAKEN by {service['name']}")
-                        return 'taken'
-                    
-                    # Need strong consensus for available (at least 4 agreeing)
-                    if len(results) >= 4:
-                        if all(r[0] == True for r in results):
-                            # Do one more verification with a different service
-                            verify_service = self._get_best_service()
-                            if verify_service and verify_service['name'] not in services_used:
-                                try:
-                                    verify_result = verify_service['func'](domain, proxy=self.proxy_manager.get_proxy())
-                                    if verify_result == False:
-                                        logger.debug(f"{domain} failed verification by {verify_service['name']}")
-                                        return 'taken'
-                                    elif verify_result == True:
-                                        logger.info(f"✓ {domain} VERIFIED by {len(results)+1} services")
-                                        return 'available'
-                                except:
-                                    pass
-                            
-                            # If we can't verify but have 4+ positive, need more checks
-                            if len(results) >= 5 and all(r[0] == True for r in results):
-                                logger.info(f"✓ {domain} confirmed by {len(results)} services")
-                                return 'available'
-                    
-                else:
-                    # Got response but unclear - this is still a failure
-                    status['consecutive_failures'] += 1
-                    
-                    if not use_proxy:
-                        status['main_ip_failures'] += 1
-                        if status['main_ip_failures'] >= 2:
-                            status['proxy_needed'] = True
-                            status['main_ip_last_fail'] = time.time()
-                            logger.debug(f"{service['name']} switching to proxy - unclear response on main IP")
-                    
-            except Exception as e:
-                # Failed completely
-                status['consecutive_failures'] += 1
-                
-                if not use_proxy:
-                    # Main IP failed
-                    status['main_ip_failures'] += 1
-                    if status['main_ip_failures'] >= 1:  # Switch faster on hard failures
-                        status['proxy_needed'] = True
-                        status['main_ip_last_fail'] = time.time()
-                        logger.debug(f"{service['name']} switching to proxy - exception on main IP: {str(e)[:50]}")
-            
-            attempts += 1
-            
-            # Minimal delay between checks when healthy
-            if not use_proxy and status['consecutive_failures'] < 2:
-                time.sleep(0.05)  # Fast when main IP is working
-            else:
-                time.sleep(0.2)  # Slower when struggling
+            if status['consecutive_failures'] < 10:
+                available_services.append(service)
         
-        # If we got here without a decision, be conservative
-        # We need at least some positive results to consider available
+        if len(available_services) < 3:
+            logger.warning("Not enough healthy services")
+            return 'taken'
+        
+        # Shuffle and take up to 8 services for parallel checking
+        random.shuffle(available_services)
+        services_to_check = available_services[:8]
+        
+        results = []
+        
+        # Parallel check with ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {}
+            
+            for service in services_to_check:
+                status = self.service_status[service['name']]
+                
+                # Decide on proxy usage
+                proxy = None
+                if status['proxy_needed']:
+                    proxy = self.proxy_manager.get_proxy()
+                    if not proxy and status['consecutive_failures'] > 3:
+                        continue  # Skip if no proxy and failing
+                
+                # Submit check to thread pool
+                future = executor.submit(self._check_with_service, domain, service, proxy)
+                futures[future] = (service, proxy is not None)
+            
+            # Collect results as they complete
+            for future in as_completed(futures, timeout=5):
+                try:
+                    service, used_proxy = futures[future]
+                    result = future.result(timeout=1)
+                    
+                    if result is not None:
+                        results.append((result, service['name']))
+                        
+                        # CRITICAL: If ANY service says taken, it's taken
+                        if result == False:
+                            logger.debug(f"{domain} marked as TAKEN by {service['name']}")
+                            executor.shutdown(wait=False)
+                            return 'taken'
+                        
+                        # If we have 3+ saying available, that's enough
+                        if len([r for r, _ in results if r == True]) >= 3:
+                            logger.info(f"✓ {domain} confirmed available by {len(results)} services")
+                            executor.shutdown(wait=False)
+                            return 'available'
+                        
+                except Exception as e:
+                    logger.debug(f"Service check failed: {e}")
+        
+        # Evaluate results
         if not results:
-            return 'taken'  # No data = assume taken
+            return 'taken'  # No data = conservative
         
-        # Count results
         true_count = sum(1 for r, _ in results if r == True)
         false_count = sum(1 for r, _ in results if r == False)
         
-        # ANY false = taken
+        # Any false = taken
         if false_count > 0:
             return 'taken'
         
-        # Need at least 3 positive to consider available
+        # Need at least 3 positive
         if true_count >= 3:
-            logger.debug(f"{domain} has {true_count} positive results but not enough verification")
-            # Could be available but not certain enough
+            return 'available'
         
-        return 'taken'  # Default conservative
+        return 'taken'  # Conservative default
+    
+    def _check_with_service(self, domain, service, proxy):
+        """Check a domain with a specific service"""
+        status = self.service_status[service['name']]
+        
+        try:
+            result = service['func'](domain, proxy=proxy)
+            
+            if result is not None:
+                # Success - update status
+                status['consecutive_failures'] = 0
+                status['total_successes'] += 1
+                status['last_success'] = time.time()
+                
+                if proxy is None:
+                    status['proxy_needed'] = False
+                    status['main_ip_failures'] = 0
+                
+                return result
+            else:
+                # Unclear result
+                status['consecutive_failures'] += 1
+                if proxy is None:
+                    status['main_ip_failures'] += 1
+                    if status['main_ip_failures'] >= 2:
+                        status['proxy_needed'] = True
+                        status['main_ip_last_fail'] = time.time()
+                return None
+                
+        except Exception as e:
+            # Failed
+            status['consecutive_failures'] += 1
+            
+            if proxy is None:
+                status['main_ip_failures'] += 1
+                if status['main_ip_failures'] >= 1:
+                    status['proxy_needed'] = True
+                    status['main_ip_last_fail'] = time.time()
+                    logger.debug(f"{service['name']} switching to proxy mode")
+            
+            return None
     
     def _get_best_service(self):
         """Get the best available service"""
@@ -753,9 +740,10 @@ class DomainHunter:
                 service_health = self.service_rotator.get_health()
                 
                 logger.info(f"=== Performance Report ===")
-                logger.info(f"Speed: {self.domains_per_second:.2f} domains/sec")
+                logger.info(f"Speed: {self.domains_per_second:.2f} domains/sec ({self.domains_per_second * 60:.0f}/min)")
                 logger.info(f"Total checked: {self.check_count}")
                 logger.info(f"Found: {len(self.found_domains)}")
+                logger.info(f"Current domain: {getattr(self, 'current_domain', 'unknown')}")
                 logger.info(f"Services: {service_health['healthy']}/{service_health['total']} healthy, "
                           f"{service_health['main_ip_ok']}/{service_health['total']} on main IP")
                 logger.info(f"Proxies: {proxy_stats['working']} working, {proxy_stats['queued']} queued")
@@ -869,13 +857,14 @@ class DomainHunter:
                 
                 combo = all_combos[i]
                 domain = f"{combo}.{current_tld}"
+                self.current_domain = domain  # Track current domain for monitoring
                 
                 # Quick DNS check (no proxy needed)
                 if not self.quick_dns_check(domain):
                     self.check_count += 1
                     continue
                 
-                # WHOIS check with smart service rotation
+                # WHOIS check with smart service rotation (now PARALLEL!)
                 status = self.service_rotator.check_domain(domain)
                 self.check_count += 1
                 
@@ -906,10 +895,9 @@ class DomainHunter:
                     proxy_stats = self.proxy_manager.get_stats()
                     logger.info(f"Progress: {self.check_count} checked | {len(self.found_domains)} found | "
                               f"MainIP OK: {service_health['main_ip_ok']}/{service_health['total']} | "
-                              f"Proxies: {proxy_stats['working']}")
+                              f"Proxies: {proxy_stats['working']} | Current: {domain}")
                 
-                # Minimal delay - we're using parallel services
-                time.sleep(0.05)
+                # No delay needed - parallel checking is fast!
             
             self.state['current_tld_index'] += 1
             self.state['current_combo_index'] = 0
