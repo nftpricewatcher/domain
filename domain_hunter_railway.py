@@ -296,8 +296,19 @@ class ServiceRotator:
         except Exception as e:
             logger.error(f"Check error: {e}")
         
-        # No definitive result
-        return 'taken'
+        # Evaluate results - KEY LOGIC FIX
+        if not results:
+            # No results at all - services timed out or failed
+            return 'taken'  # Conservative: assume taken if we can't check
+        
+        # Check if ANY service confirmed TAKEN (found registration data)
+        if any(r == False for r, _ in results):
+            return 'taken'
+        
+        # NO service found registration data = domain is AVAILABLE
+        # This includes cases where services returned True OR returned None (unclear)
+        # If even one service checked and didn't find registration = available
+        return 'available'
     
     def _check_with_service(self, domain, service, proxy):
         """Check a domain with a specific service - WITH STRATEGIC DELAYS"""
