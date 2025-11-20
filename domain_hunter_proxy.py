@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # Priority TLDs (shortest and most valuable first)
 PRIORITY_TLDS = [
-    'io', 'ai', 'me', 'co', 'to', 'so', 'sh', 'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
+    'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
     'com', 'net', 'org', 'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
 ]
 
