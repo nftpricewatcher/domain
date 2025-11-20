@@ -41,6 +41,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class RateLimitError(Exception):
+    pass
+
 # Priority TLDs
 PRIORITY_TLDS = [
     'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
@@ -326,20 +329,25 @@ class ServiceRotator:
             else:
                 # Unclear
                 status['consecutive_failures'] += 0.5  # Half penalty for unclear
-                if proxy is None:
-                    status['main_ip_failures'] += 1
-                    if status['main_ip_failures'] >= 3:
-                        status['proxy_needed'] = True
-                        status['main_ip_last_fail'] = time.time()
                 return None
                 
-        except Exception:
-            # Failed
+        except RateLimitError:
+            logger.debug(f"Rate limited: {service['name']} ({'proxy' if proxy else 'main'})")
+            status['consecutive_failures'] += 1
+            if proxy is None:
+                status['main_ip_failures'] += 1
+                if status['main_ip_failures'] >= 2:
+                    status['proxy_needed'] = True
+                    status['main_ip_last_fail'] = time.time()
+            return None
+                
+        except Exception as e:
+            logger.debug(f"Error in {service['name']}: {str(e)}")
             status['consecutive_failures'] += 1
             
             if proxy is None:
                 status['main_ip_failures'] += 1
-                if status['main_ip_failures'] >= 2:
+                if status['main_ip_failures'] >= 3:
                     status['proxy_needed'] = True
                     status['main_ip_last_fail'] = time.time()
             
@@ -394,6 +402,7 @@ class ServiceRotator:
     
     def _make_request(self, url, proxy=None, timeout=6):
         """Make HTTP request with optional proxy"""
+        time.sleep(random.uniform(0.05, 0.25))
         headers = {
             'User-Agent': random.choice([
                 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
@@ -404,9 +413,14 @@ class ServiceRotator:
         
         if proxy:
             proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
-            return requests.get(url, headers=headers, proxies=proxies, timeout=timeout, verify=False)
+            response = requests.get(url, headers=headers, proxies=proxies, timeout=timeout, verify=False)
         else:
-            return requests.get(url, headers=headers, timeout=timeout, verify=False)
+            response = requests.get(url, headers=headers, timeout=timeout, verify=False)
+        
+        if response.status_code == 429:
+            raise RateLimitError(f"Rate limited on {url} with code {response.status_code}")
+        
+        return response
     
     # Service implementations
     def check_godaddy(self, domain, proxy=None):
