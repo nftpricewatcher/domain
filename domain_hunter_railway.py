@@ -7,7 +7,7 @@ import itertools
 import socket
 import random
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import signal
 import sys
 import warnings
@@ -28,8 +28,9 @@ except:
     print("ERROR: requests module required. Install with: pip install requests")
     sys.exit(1)
 
-# Setup logging
+# Setup logging with /data path
 log_level = os.environ.get('LOG_LEVEL', 'INFO')
+os.makedirs('/data', exist_ok=True)
 logging.basicConfig(
     level=getattr(logging, log_level),
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Priority TLDs
 PRIORITY_TLDS = [
-    'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
+    'io', 'ai', 'me', 'co', 'to', 'so', 'sh', 'gg', 'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
     'com', 'net', 'org', 'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
 ]
 
@@ -50,17 +51,17 @@ class SmartProxyManager:
     """Efficient proxy manager - only gets proxies when needed"""
     
     def __init__(self):
-        self.working_proxies = deque(maxlen=20)
+        self.working_proxies = deque(maxlen=30)  # Keep more proxies
         self.proxy_queue = Queue()
         self.last_scrape = 0
-        self.scrape_interval = 7200
+        self.scrape_interval = 3600  # 1 hour between scrapes
         self.running = True
         self.currently_scraping = False
         
         self.tester_thread = threading.Thread(target=self._minimal_tester, daemon=True)
         self.tester_thread.start()
         
-        logger.info("Smart proxy manager initialized - will only scrape when needed")
+        logger.info("Smart proxy manager initialized")
     
     def get_proxy(self):
         """Get a working proxy or None"""
@@ -72,10 +73,10 @@ class SmartProxyManager:
     
     def need_more_proxies(self):
         """Check if we need more proxies"""
-        return len(self.working_proxies) < 5
+        return len(self.working_proxies) < 10
     
     def trigger_scrape(self):
-        """Trigger proxy scraping if needed and not recently done"""
+        """Trigger proxy scraping if needed"""
         current_time = time.time()
         if (current_time - self.last_scrape > self.scrape_interval and 
             not self.currently_scraping and self.need_more_proxies()):
@@ -86,23 +87,24 @@ class SmartProxyManager:
     def _scrape_once(self):
         """Scrape proxies once and add to queue"""
         try:
-            logger.info("Starting one-time proxy scrape...")
+            logger.info("Starting proxy scrape...")
             
             urls = [
                 'https://www.proxy-list.download/api/v1/get?type=http&anon=elite',
-                'https://api.proxyscrape.com/v2/?request=get&protocol=http&timeout=5000&country=all&simplified=true',
+                'https://api.proxyscrape.com/v2/?request=get&protocol=http&timeout=10000&country=all&simplified=true',
                 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
                 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
+                'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
             ]
             
             proxies = set()
             for url in urls:
                 try:
-                    response = requests.get(url, timeout=3)
+                    response = requests.get(url, timeout=5)
                     if response.status_code == 200:
                         found = re.findall(r'\d+\.\d+\.\d+\.\d+:\d+', response.text)
-                        proxies.update(found[:100])
-                        if len(proxies) > 200:
+                        proxies.update(found[:200])
+                        if len(proxies) > 300:
                             break
                 except:
                     continue
@@ -121,8 +123,8 @@ class SmartProxyManager:
         """Test proxies from queue efficiently"""
         while self.running:
             try:
-                if len(self.working_proxies) >= 10:
-                    time.sleep(10)
+                if len(self.working_proxies) >= 20:
+                    time.sleep(30)
                     continue
                 
                 try:
@@ -130,33 +132,31 @@ class SmartProxyManager:
                 except Empty:
                     if self.need_more_proxies():
                         self.trigger_scrape()
-                    time.sleep(5)
+                    time.sleep(10)
                     continue
                 
                 if self._test_proxy(proxy):
                     if proxy not in self.working_proxies:
                         self.working_proxies.append(proxy)
-                        logger.debug(f"Added working proxy: {proxy} (total: {len(self.working_proxies)})")
+                        logger.debug(f"Added working proxy (total: {len(self.working_proxies)})")
                 
             except Exception as e:
-                logger.debug(f"Error in tester: {e}")
+                logger.debug(f"Proxy tester error: {e}")
                 time.sleep(5)
     
     def _test_proxy(self, proxy):
         """Quick proxy test"""
         try:
             proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
-            response = requests.get('http://httpbin.org/ip', proxies=proxies, timeout=3, verify=False)
+            response = requests.get('http://httpbin.org/ip', proxies=proxies, timeout=5, verify=False)
             return response.status_code == 200
         except:
             return False
     
     def get_stats(self):
-        """Get current stats"""
         return {
             'working': len(self.working_proxies),
-            'queued': self.proxy_queue.qsize(),
-            'last_scrape': time.time() - self.last_scrape
+            'queued': self.proxy_queue.qsize()
         }
 
 
@@ -173,18 +173,26 @@ class ServiceRotator:
         self.recovery_thread.start()
     
     def _init_services(self):
-        """Initialize all WHOIS services"""
-        return [
-            {'name': 'godaddy_main', 'func': self.check_godaddy, 'weight': 20},
-            {'name': 'godaddy_alt', 'func': self.check_godaddy, 'weight': 20},
-            {'name': 'namecheap_main', 'func': self.check_namecheap, 'weight': 20},
-            {'name': 'namecheap_alt', 'func': self.check_namecheap, 'weight': 20},
-            {'name': 'porkbun_main', 'func': self.check_porkbun, 'weight': 15},
-            {'name': 'porkbun_alt', 'func': self.check_porkbun, 'weight': 15},
-            {'name': 'whois_com', 'func': self.check_whois_com, 'weight': 15},
-            {'name': 'who_is', 'func': self.check_who_is, 'weight': 15},
-            {'name': 'whois_com_alt', 'func': self.check_whois_com, 'weight': 15},
-            {'name': 'who_is_alt', 'func': self.check_who_is, 'weight': 15},
+        """Initialize MORE service endpoints for better distribution"""
+        services = []
+        
+        # Create 5 copies of each good service for load distribution
+        for i in range(5):
+            services.extend([
+                {'name': f'godaddy_{i}', 'func': self.check_godaddy, 'weight': 20},
+                {'name': f'namecheap_{i}', 'func': self.check_namecheap, 'weight': 20},
+                {'name': f'porkbun_{i}', 'func': self.check_porkbun, 'weight': 15},
+            ])
+        
+        # Create 3 copies of WHOIS services
+        for i in range(3):
+            services.extend([
+                {'name': f'whois_com_{i}', 'func': self.check_whois_com, 'weight': 15},
+                {'name': f'who_is_{i}', 'func': self.check_who_is, 'weight': 15},
+            ])
+        
+        # Add other services
+        services.extend([
             {'name': 'mxtoolbox', 'func': self.check_mxtoolbox, 'weight': 10},
             {'name': 'hostinger', 'func': self.check_hostinger, 'weight': 10},
             {'name': 'name_com', 'func': self.check_namecom, 'weight': 10},
@@ -193,13 +201,9 @@ class ServiceRotator:
             {'name': 'dynadot', 'func': self.check_dynadot, 'weight': 8},
             {'name': 'hover', 'func': self.check_hover, 'weight': 8},
             {'name': 'domain_com', 'func': self.check_domaincom, 'weight': 8},
-            {'name': 'bluehost', 'func': self.check_bluehost, 'weight': 5},
-            {'name': 'register_com', 'func': self.check_registercom, 'weight': 5},
-            {'name': 'enom', 'func': self.check_enom, 'weight': 5},
-            {'name': 'dreamhost', 'func': self.check_dreamhost, 'weight': 5},
-            {'name': 'godaddy_3', 'func': self.check_godaddy, 'weight': 10},
-            {'name': 'namecheap_3', 'func': self.check_namecheap, 'weight': 10},
-        ]
+        ])
+        
+        return services
     
     def init_service_status(self):
         """Initialize status for each service"""
@@ -209,97 +213,97 @@ class ServiceRotator:
                 'main_ip_last_fail': 0,
                 'proxy_needed': False,
                 'last_success': time.time(),
+                'last_used': 0,  # Track when last used
                 'total_successes': 0,
                 'consecutive_failures': 0
             }
     
     def check_domain(self, domain):
-        """Check domain using parallel service checks - WITH PROPER ERROR HANDLING"""
+        """Check domain with LIMITED parallel checking to avoid burning services"""
         # Get available services
         available_services = []
+        current_time = time.time()
+        
         for service in self.services:
             status = self.service_status[service['name']]
-            if status['consecutive_failures'] < 10:
+            # Don't use if recently used (rate limiting)
+            if current_time - status['last_used'] < 1:  # 1 second cooldown per service
+                continue
+            if status['consecutive_failures'] < 5:
                 available_services.append(service)
         
         if len(available_services) < 3:
-            logger.warning("Not enough healthy services")
+            logger.warning("Not enough healthy services, waiting...")
+            time.sleep(2)  # Wait for services to recover
             return 'taken'
         
-        # Shuffle and take up to 8 services
+        # Only check 4 services at once to avoid burning them all
         random.shuffle(available_services)
-        services_to_check = available_services[:8]
+        services_to_check = available_services[:4]  # Reduced from 8
         
         results = []
         
         try:
-            # Parallel check with ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=8) as executor:
+            with ThreadPoolExecutor(max_workers=4) as executor:
                 futures = {}
                 
                 for service in services_to_check:
                     status = self.service_status[service['name']]
+                    status['last_used'] = current_time
                     
                     # Decide on proxy usage
                     proxy = None
                     if status['proxy_needed']:
                         proxy = self.proxy_manager.get_proxy()
-                        if not proxy and status['consecutive_failures'] > 3:
+                        if not proxy and status['consecutive_failures'] > 2:
                             continue
                     
-                    # Submit check to thread pool
                     future = executor.submit(self._check_with_service, domain, service, proxy)
                     futures[future] = (service, proxy is not None)
                 
-                # Collect results with timeout handling
                 try:
-                    for future in as_completed(futures, timeout=5):
+                    for future in as_completed(futures, timeout=8):
                         try:
                             service, used_proxy = futures[future]
-                            result = future.result(timeout=0.5)
+                            result = future.result(timeout=1)
                             
                             if result is not None:
                                 results.append((result, service['name']))
                                 
-                                # If ANY service says taken, it's taken
                                 if result == False:
-                                    logger.debug(f"{domain} marked as TAKEN by {service['name']}")
+                                    logger.debug(f"{domain} is TAKEN (confirmed by {service['name']})")
                                     executor.shutdown(wait=False, cancel_futures=True)
                                     return 'taken'
                                 
-                                # If we have 3+ saying available, that's enough
                                 if len([r for r, _ in results if r == True]) >= 3:
                                     logger.info(f"✓ {domain} confirmed available by {len(results)} services")
                                     executor.shutdown(wait=False, cancel_futures=True)
                                     return 'available'
                             
-                        except Exception as e:
-                            logger.debug(f"Service check failed: {e}")
+                        except:
+                            pass
                             
                 except FutureTimeoutError:
-                    # Some futures timed out, but we may have enough results
-                    logger.debug(f"Some services timed out checking {domain}, using available results")
+                    logger.debug("Some services timed out")
                     executor.shutdown(wait=False, cancel_futures=True)
                     
         except Exception as e:
-            logger.error(f"Error in parallel checking: {e}")
+            logger.error(f"Check error: {e}")
         
-        # Evaluate whatever results we got
+        # Evaluate results
         if not results:
-            return 'taken'  # No data = conservative
+            return 'taken'
         
         true_count = sum(1 for r, _ in results if r == True)
         false_count = sum(1 for r, _ in results if r == False)
         
-        # Any false = taken
         if false_count > 0:
             return 'taken'
         
-        # Need at least 3 positive
         if true_count >= 3:
             return 'available'
         
-        return 'taken'  # Conservative default
+        return 'taken'
     
     def _check_with_service(self, domain, service, proxy):
         """Check a domain with a specific service"""
@@ -309,7 +313,7 @@ class ServiceRotator:
             result = service['func'](domain, proxy=proxy)
             
             if result is not None:
-                # Success - update status
+                # Success
                 status['consecutive_failures'] = 0
                 status['total_successes'] += 1
                 status['last_success'] = time.time()
@@ -320,64 +324,33 @@ class ServiceRotator:
                 
                 return result
             else:
-                # Unclear result
-                status['consecutive_failures'] += 1
+                # Unclear
+                status['consecutive_failures'] += 0.5  # Half penalty for unclear
                 if proxy is None:
                     status['main_ip_failures'] += 1
-                    if status['main_ip_failures'] >= 2:
+                    if status['main_ip_failures'] >= 3:
                         status['proxy_needed'] = True
                         status['main_ip_last_fail'] = time.time()
                 return None
                 
-        except Exception as e:
+        except Exception:
             # Failed
             status['consecutive_failures'] += 1
             
             if proxy is None:
                 status['main_ip_failures'] += 1
-                if status['main_ip_failures'] >= 1:
+                if status['main_ip_failures'] >= 2:
                     status['proxy_needed'] = True
                     status['main_ip_last_fail'] = time.time()
-                    logger.debug(f"{service['name']} switching to proxy mode")
             
             return None
     
-    def _get_best_service(self):
-        """Get the best available service"""
-        available = []
-        current_time = time.time()
-        
-        for service in self.services:
-            status = self.service_status[service['name']]
-            
-            if status['consecutive_failures'] > 5:
-                if status['consecutive_failures'] > 3 and not status['proxy_needed']:
-                    status['proxy_needed'] = True
-                    status['main_ip_last_fail'] = current_time
-                    logger.debug(f"{service['name']} switching to proxy mode due to failures")
-                continue
-            
-            weight = max(1, service['weight'] - status['consecutive_failures'])
-            available.extend([service] * weight)
-        
-        if available:
-            return random.choice(available)
-        
-        logger.warning("All services down, forcing reset and proxy mode")
-        for name, status in self.service_status.items():
-            if status['consecutive_failures'] > 2:
-                status['proxy_needed'] = True
-                status['main_ip_last_fail'] = current_time
-            status['consecutive_failures'] = max(0, status['consecutive_failures'] - 3)
-        
-        return random.choice(self.services)
-    
     def _recovery_loop(self):
-        """Periodically test and recover services"""
-        test_domains = ['google.com', 'facebook.com']
+        """Aggressively recover services"""
+        test_domains = ['google.com', 'facebook.com', 'amazon.com']
         
         while True:
-            time.sleep(60)
+            time.sleep(20)  # Check every 20 seconds
             
             try:
                 current_time = time.time()
@@ -386,13 +359,14 @@ class ServiceRotator:
                 for service in self.services:
                     status = self.service_status[service['name']]
                     
+                    # Try recovery after 30 seconds
                     if (status['proxy_needed'] and 
-                        current_time - status['main_ip_last_fail'] > 120):
+                        current_time - status['main_ip_last_fail'] > 30):
                         
                         try:
                             test_domain = random.choice(test_domains)
                             result = service['func'](test_domain, proxy=None)
-                            if result == False:
+                            if result == False:  # Correctly identified
                                 status['proxy_needed'] = False
                                 status['main_ip_failures'] = 0
                                 status['consecutive_failures'] = 0
@@ -400,24 +374,25 @@ class ServiceRotator:
                         except:
                             pass
                     
+                    # Decay failures over time
                     if status['consecutive_failures'] > 0:
                         status['consecutive_failures'] = max(0, status['consecutive_failures'] - 1)
                 
                 if recovered:
-                    logger.info(f"Recovered services for main IP: {recovered}")
+                    logger.info(f"Recovered {len(recovered)} services for main IP")
                 
                 healthy = sum(1 for s in self.service_status.values() 
                             if s['consecutive_failures'] < 3)
                 main_ip_ok = sum(1 for s in self.service_status.values() 
                                 if not s['proxy_needed'])
                 
-                logger.debug(f"Service health: {healthy}/{len(self.services)} healthy, "
-                           f"{main_ip_ok}/{len(self.services)} work on main IP")
+                logger.debug(f"Health: {healthy}/{len(self.services)} healthy, "
+                           f"{main_ip_ok}/{len(self.services)} on main IP")
                 
             except Exception as e:
                 logger.error(f"Recovery error: {e}")
     
-    def _make_request(self, url, proxy=None, timeout=5):
+    def _make_request(self, url, proxy=None, timeout=6):
         """Make HTTP request with optional proxy"""
         headers = {
             'User-Agent': random.choice([
@@ -437,7 +412,7 @@ class ServiceRotator:
     def check_godaddy(self, domain, proxy=None):
         try:
             url = f"https://find.godaddy.com/domainsapi/v1/search/exact?q={domain}&key=dpp_search"
-            response = self._make_request(url, proxy)
+            response = self._make_request(url, proxy, timeout=5)
             if response and response.status_code == 200:
                 data = response.json()
                 if 'ExactMatchDomain' in data:
@@ -452,7 +427,7 @@ class ServiceRotator:
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
                 text = response.text.lower()
-                if 'domain taken' in text or 'unavailable' in text:
+                if 'domain taken' in text or 'unavailable' in text or 'already registered' in text:
                     return False
                 if 'add to cart' in text and domain.lower() in text:
                     return True
@@ -468,7 +443,7 @@ class ServiceRotator:
                 text = response.text.lower()
                 if 'add to cart' in text or 'register this domain' in text:
                     return True
-                if 'unavailable' in text or 'already registered' in text:
+                if 'unavailable' in text or 'already registered' in text or 'is taken' in text:
                     return False
             return None
         except:
@@ -482,7 +457,7 @@ class ServiceRotator:
                 text = response.text.lower()
                 if 'available for registration' in text or 'no match for' in text:
                     return True
-                if any(x in text for x in ['registrar:', 'creation date:', 'registry expiry']):
+                if any(x in text for x in ['registrar:', 'creation date:', 'registry expiry', 'domain name:']):
                     return False
             return None
         except:
@@ -494,9 +469,9 @@ class ServiceRotator:
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
                 text = response.text
-                if 'No Data Found' in text or 'NOT FOUND' in text:
+                if 'No Data Found' in text or 'NOT FOUND' in text or 'No match for' in text:
                     return True
-                if any(x in text for x in ['Registrar:', 'Created:', 'Expires:']):
+                if any(x in text for x in ['Registrar:', 'Created:', 'Expires:', 'Domain Name:']):
                     return False
             return None
         except:
@@ -507,9 +482,9 @@ class ServiceRotator:
             url = f"https://mxtoolbox.com/SuperTool.aspx?action=whois%3a{domain}"
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
-                if 'No Data Found' in response.text:
+                if 'No Data Found' in response.text or 'No Match' in response.text:
                     return True
-                if 'Registrar:' in response.text:
+                if 'Registrar:' in response.text or 'Creation Date:' in response.text:
                     return False
             return None
         except:
@@ -521,9 +496,9 @@ class ServiceRotator:
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
                 text = response.text.lower()
-                if 'is available' in text:
+                if 'is available' in text and 'not available' not in text:
                     return True
-                if 'taken' in text:
+                if 'taken' in text or 'unavailable' in text:
                     return False
             return None
         except:
@@ -535,9 +510,9 @@ class ServiceRotator:
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
                 text = response.text.lower()
-                if 'is available' in text:
+                if 'is available' in text and domain.lower() in text:
                     return True
-                if 'is taken' in text:
+                if 'is taken' in text or 'unavailable' in text:
                     return False
             return None
         except:
@@ -548,9 +523,9 @@ class ServiceRotator:
             url = f"https://www.gandi.net/domain/suggest?search={domain}"
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
-                if 'available' in response.text.lower():
+                if 'available' in response.text.lower() and 'not available' not in response.text.lower():
                     return True
-                if 'taken' in response.text.lower():
+                if 'taken' in response.text.lower() or 'registered' in response.text.lower():
                     return False
             return None
         except:
@@ -561,7 +536,7 @@ class ServiceRotator:
             url = f"https://www.namesilo.com/domain/search-domains?query={domain}"
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
-                if 'available' in response.text.lower():
+                if 'available' in response.text.lower() and 'unavailable' not in response.text.lower():
                     return True
                 if 'unavailable' in response.text.lower():
                     return False
@@ -575,9 +550,9 @@ class ServiceRotator:
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
                 text = response.text.lower()
-                if 'add to cart' in text:
+                if 'add to cart' in text and domain.lower() in text:
                     return True
-                if 'taken' in text:
+                if 'taken' in text or 'registered' in text:
                     return False
             return None
         except:
@@ -588,9 +563,9 @@ class ServiceRotator:
             url = f"https://www.hover.com/domains/results?q={domain}"
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
-                if 'available' in response.text.lower():
+                if 'available' in response.text.lower() and 'not available' not in response.text.lower():
                     return True
-                if 'taken' in response.text.lower():
+                if 'taken' in response.text.lower() or 'unavailable' in response.text.lower():
                     return False
             return None
         except:
@@ -601,61 +576,9 @@ class ServiceRotator:
             url = f"https://www.domain.com/domains/search/results/?q={domain}"
             response = self._make_request(url, proxy)
             if response and response.status_code == 200:
-                if 'available' in response.text.lower():
+                if 'available' in response.text.lower() and 'not available' not in response.text.lower():
                     return True
-                if 'taken' in response.text.lower():
-                    return False
-            return None
-        except:
-            return None
-    
-    def check_bluehost(self, domain, proxy=None):
-        try:
-            url = f"https://www.bluehost.com/domains?search={domain}"
-            response = self._make_request(url, proxy)
-            if response and response.status_code == 200:
-                if 'available' in response.text.lower():
-                    return True
-                if 'taken' in response.text.lower():
-                    return False
-            return None
-        except:
-            return None
-    
-    def check_registercom(self, domain, proxy=None):
-        try:
-            url = f"https://www.register.com/domain/search/wizard.rcmx?searchDomainName={domain}"
-            response = self._make_request(url, proxy)
-            if response and response.status_code == 200:
-                if 'is available' in response.text.lower():
-                    return True
-                if 'not available' in response.text.lower():
-                    return False
-            return None
-        except:
-            return None
-    
-    def check_enom(self, domain, proxy=None):
-        try:
-            url = f"https://www.enom.com/domains/search-results?query={domain}"
-            response = self._make_request(url, proxy)
-            if response and response.status_code == 200:
-                if 'available' in response.text.lower():
-                    return True
-                if 'taken' in response.text.lower():
-                    return False
-            return None
-        except:
-            return None
-    
-    def check_dreamhost(self, domain, proxy=None):
-        try:
-            url = f"https://www.dreamhost.com/domains/search/?domain={domain}"
-            response = self._make_request(url, proxy)
-            if response and response.status_code == 200:
-                if 'is available' in response.text.lower():
-                    return True
-                if 'is taken' in response.text.lower():
+                if 'taken' in response.text.lower() or 'unavailable' in response.text.lower():
                     return False
             return None
         except:
@@ -682,16 +605,16 @@ class DomainHunter:
         self.state = self.load_state()
         self.found_domains = self.load_results()
         self.running = True
-        self.check_count = 0
+        self.check_count = self.state.get('total_checked', 0)  # Resume count
         self.domains_per_second = 0
         self.last_stats_time = time.time()
-        self.last_stats_count = 0
-        self.current_domain = "Not started"
+        self.last_stats_count = self.check_count
+        self.current_domain = "Starting..."
         
         self.proxy_manager = SmartProxyManager()
         self.service_rotator = ServiceRotator(self.proxy_manager)
         
-        threading.Timer(5, self.proxy_manager.trigger_scrape).start()
+        threading.Timer(3, self.proxy_manager.trigger_scrape).start()
         
         signal.signal(signal.SIGTERM, self.shutdown)
         signal.signal(signal.SIGINT, self.shutdown)
@@ -699,7 +622,7 @@ class DomainHunter:
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
         
-        logger.info("Domain Hunter initialized - prioritizing main IP, proxies on demand")
+        logger.info(f"Domain Hunter initialized - Resuming from domain #{self.check_count}")
     
     def _monitor_loop(self):
         """Monitor system health and performance"""
@@ -723,14 +646,18 @@ class DomainHunter:
                 logger.info(f"Speed: {self.domains_per_second:.2f} domains/sec ({self.domains_per_second * 60:.0f}/min)")
                 logger.info(f"Total checked: {self.check_count}")
                 logger.info(f"Found: {len(self.found_domains)}")
-                logger.info(f"Current domain: {self.current_domain}")
+                logger.info(f"Current: {self.current_domain}")
                 logger.info(f"Services: {service_health['healthy']}/{service_health['total']} healthy, "
                           f"{service_health['main_ip_ok']}/{service_health['total']} on main IP")
-                logger.info(f"Proxies: {proxy_stats['working']} working, {proxy_stats['queued']} queued")
+                logger.info(f"Proxies: {proxy_stats['working']} working")
                 
-                if proxy_stats['working'] < 3 and service_health['main_ip_ok'] < 10:
-                    logger.info("Low on working connections, getting more proxies...")
+                # Trigger proxy scrape if needed
+                if proxy_stats['working'] < 5 and service_health['main_ip_ok'] < 15:
+                    logger.info("Getting more proxies...")
                     self.proxy_manager.trigger_scrape()
+                
+                # Save state periodically
+                self.save_state()
                 
                 gc.collect()
                 
@@ -745,12 +672,18 @@ class DomainHunter:
         sys.exit(0)
     
     def load_state(self):
+        """Load state with proper defaults"""
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file, 'r') as f:
-                    return json.load(f)
-            except:
-                pass
+                    state = json.load(f)
+                    logger.info(f"Loaded state: {state.get('current_length')} chars, "
+                              f"TLD #{state.get('current_tld_index')}, "
+                              f"combo #{state.get('current_combo_index')}")
+                    return state
+            except Exception as e:
+                logger.error(f"Error loading state: {e}")
+        
         return {
             'current_length': 3,
             'current_tld_index': 0,
@@ -761,37 +694,64 @@ class DomainHunter:
         }
     
     def save_state(self):
-        self.state['last_update'] = str(datetime.now())
-        self.state['total_checked'] = self.check_count
-        self.state['total_found'] = len(self.found_domains)
-        os.makedirs('/data', exist_ok=True)
-        with open(self.state_file, 'w') as f:
-            json.dump(self.state, f, indent=2)
+        """Save state reliably"""
+        try:
+            self.state['last_update'] = str(datetime.now())
+            self.state['total_checked'] = self.check_count
+            self.state['total_found'] = len(self.found_domains)
+            
+            os.makedirs('/data', exist_ok=True)
+            
+            # Write to temp file first
+            temp_file = self.state_file + '.tmp'
+            with open(temp_file, 'w') as f:
+                json.dump(self.state, f, indent=2)
+            
+            # Then rename atomically
+            os.replace(temp_file, self.state_file)
+            
+        except Exception as e:
+            logger.error(f"Error saving state: {e}")
     
     def load_results(self):
+        """Load results reliably"""
         if os.path.exists(self.results_file):
             try:
                 with open(self.results_file, 'r') as f:
-                    return json.load(f)
+                    results = json.load(f)
+                    logger.info(f"Loaded {len(results)} previously found domains")
+                    return results
             except:
                 pass
+        
         os.makedirs('/data', exist_ok=True)
         with open(self.results_file, 'w') as f:
             json.dump([], f)
         return []
     
     def save_results(self):
-        os.makedirs('/data', exist_ok=True)
-        with open(self.results_file, 'w') as f:
-            json.dump(self.found_domains, f, indent=2)
+        """Save results reliably"""
+        try:
+            os.makedirs('/data', exist_ok=True)
+            
+            # Write to temp file first
+            temp_file = self.results_file + '.tmp'
+            with open(temp_file, 'w') as f:
+                json.dump(self.found_domains, f, indent=2)
+            
+            # Then rename atomically
+            os.replace(temp_file, self.results_file)
+            
+        except Exception as e:
+            logger.error(f"Error saving results: {e}")
     
     def quick_dns_check(self, domain):
-        """Fast DNS check - no proxy needed"""
+        """Fast DNS check"""
         try:
             socket.gethostbyname(domain)
-            return False
+            return False  # Resolves = taken
         except socket.gaierror:
-            return True
+            return True  # Doesn't resolve = potentially available
         except:
             return True
     
@@ -801,14 +761,14 @@ class DomainHunter:
             yield ''.join(combo)
     
     def search_domains(self):
-        """Main search loop - optimized for speed"""
-        logger.info("Starting optimized domain search...")
+        """Main search loop with smart delays"""
+        logger.info("Starting domain search...")
         
         while self.running:
             current_length = self.state['current_length']
             
             if current_length > 6:
-                logger.info("Completed all lengths, restarting from 3...")
+                logger.info("Completed all lengths, restarting...")
                 self.state['current_length'] = 3
                 self.state['current_tld_index'] = 0
                 self.state['current_combo_index'] = 0
@@ -830,7 +790,8 @@ class DomainHunter:
             
             all_combos = list(self.generate_combinations(current_length, chars))
             
-            logger.info(f"Checking {current_length}-char .{current_tld} domains ({len(all_combos)} total)")
+            logger.info(f"Checking {current_length}-char .{current_tld} domains "
+                       f"(starting from #{self.state['current_combo_index']} of {len(all_combos)})")
             
             for i in range(self.state['current_combo_index'], len(all_combos)):
                 if not self.running:
@@ -845,7 +806,7 @@ class DomainHunter:
                     self.check_count += 1
                     continue
                 
-                # WHOIS check with parallel services
+                # WHOIS check
                 status = self.service_rotator.check_domain(domain)
                 self.check_count += 1
                 
@@ -859,36 +820,51 @@ class DomainHunter:
                     self.found_domains.append(result)
                     logger.info(f"🎯 FOUND AVAILABLE: {domain}")
                     self.save_results()
-                    
-                    time.sleep(2)
+                    time.sleep(3)  # Cool down after find
                 
                 self.state['current_combo_index'] = i
                 
-                if self.check_count % 300 == 0:
-                    self.save_state()
+                # SMART DELAYS based on service health
+                service_health = self.service_rotator.get_health()
+                if service_health['healthy'] < 10:
+                    # Few healthy services - wait longer
+                    time.sleep(0.8)
+                elif service_health['healthy'] < 20:
+                    # Some healthy services
+                    time.sleep(0.3)
+                else:
+                    # Many healthy services
+                    time.sleep(0.1)
                 
+                # Save state periodically
                 if self.check_count % 100 == 0:
-                    service_health = self.service_rotator.get_health()
+                    self.save_state()
+                    
+                    # Progress log
                     proxy_stats = self.proxy_manager.get_stats()
                     logger.info(f"Progress: {self.check_count} checked | {len(self.found_domains)} found | "
-                              f"MainIP OK: {service_health['main_ip_ok']}/{service_health['total']} | "
-                              f"Proxies: {proxy_stats['working']} | Current: {domain}")
+                              f"Health: {service_health['healthy']}/{service_health['total']} | "
+                              f"Current: {domain}")
             
+            # Move to next TLD
             self.state['current_tld_index'] += 1
             self.state['current_combo_index'] = 0
             self.save_state()
     
     def run(self):
         logger.info("="*60)
-        logger.info("DOMAIN HUNTER V5 - FIXED")
+        logger.info("DOMAIN HUNTER V6 - BALANCED")
         logger.info("="*60)
-        logger.info(f"Starting from: {self.state['current_length']} chars, TLD #{self.state['current_tld_index']}")
+        logger.info(f"Resuming from: {self.state['current_length']} chars, "
+                   f"TLD #{self.state['current_tld_index']}, "
+                   f"combo #{self.state['current_combo_index']}")
         logger.info(f"Previously found: {len(self.found_domains)} domains")
-        logger.info("Fixed:")
-        logger.info("  • Parallel checking with timeout handling")
-        logger.info("  • All paths use /data/ volume")
-        logger.info("  • No crashes on timeouts")
-        logger.info("  • Shows current domain in logs")
+        logger.info(f"Total checked: {self.check_count}")
+        logger.info("Features:")
+        logger.info("  • Smart delays to prevent rate limiting")
+        logger.info("  • More service copies for load distribution")
+        logger.info("  • Aggressive recovery (every 20 seconds)")
+        logger.info("  • Reliable state saving and resuming")
         logger.info("="*60)
         
         try:
