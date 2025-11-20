@@ -162,11 +162,11 @@ class SmartProxyManager:
 class ServiceRotator:
     """Manages WHOIS services with intelligent rotation and recovery"""
     
-    # STRATEGIC DELAYS: Main IP needs longer delays to avoid rate limiting
-    MAIN_IP_DELAY = 0.6  # 600ms between main IP requests (prevents rate limiting)
-    PROXY_DELAY = 0.15   # 150ms between proxy requests (proxies are fresh)
-    MAIN_IP_FAILURE_THRESHOLD = 5  # More patient before switching to proxy
-    RECOVERY_CHECK_INTERVAL = 10    # Check main IP recovery every 10 seconds
+    # STRATEGIC DELAYS: Balance speed with rate limit prevention
+    MAIN_IP_DELAY = 0.25  # 250ms between main IP requests per service
+    PROXY_DELAY = 0.05    # 50ms between proxy requests (proxies are fresh)
+    MAIN_IP_FAILURE_THRESHOLD = 7  # Very patient before switching to proxy
+    RECOVERY_CHECK_INTERVAL = 15   # Check main IP recovery every 15 seconds
     
     def __init__(self, proxy_manager):
         self.proxy_manager = proxy_manager
@@ -225,38 +225,37 @@ class ServiceRotator:
             }
     
     def check_domain(self, domain):
-        """Check domain with LIMITED parallel checking to avoid burning services"""
+        """Check domain - if ANY service confirms no registration data, it's available"""
         available_services = []
         current_time = time.time()
         
         for service in self.services:
             status = self.service_status[service['name']]
-            # Don't use if recently used (rate limiting)
-            if current_time - status['last_used'] < 0.5:
+            if current_time - status['last_used'] < 0.3:
                 continue
             if status['consecutive_failures'] < 5:
                 available_services.append(service)
         
         if len(available_services) < 3:
             logger.warning("Not enough healthy services, waiting...")
-            time.sleep(2)
+            time.sleep(1)
             return 'taken'
         
-        # Only check 4 services at once to avoid burning them all
+        # Check 6 services for better coverage
         random.shuffle(available_services)
-        services_to_check = available_services[:4]
+        services_to_check = available_services[:6]
         
         results = []
         
         try:
-            with ThreadPoolExecutor(max_workers=4) as executor:
+            with ThreadPoolExecutor(max_workers=6) as executor:
                 futures = {}
                 
                 for service in services_to_check:
                     status = self.service_status[service['name']]
                     status['last_used'] = current_time
                     
-                    # SMART PROXY DECISION: Only use proxy if main IP is confirmed rate limited
+                    # Use proxy if needed
                     proxy = None
                     if status['proxy_needed']:
                         proxy = self.proxy_manager.get_proxy()
@@ -267,7 +266,7 @@ class ServiceRotator:
                     futures[future] = (service, proxy is not None)
                 
                 try:
-                    for future in as_completed(futures, timeout=8):
+                    for future in as_completed(futures, timeout=6):
                         try:
                             service, used_proxy = futures[future]
                             result = future.result(timeout=1)
@@ -275,13 +274,15 @@ class ServiceRotator:
                             if result is not None:
                                 results.append((result, service['name']))
                                 
+                                # If TAKEN - one confirmation is enough
                                 if result == False:
                                     logger.debug(f"{domain} is TAKEN (confirmed by {service['name']})")
                                     executor.shutdown(wait=False, cancel_futures=True)
                                     return 'taken'
                                 
-                                if len([r for r, _ in results if r == True]) >= 3:
-                                    logger.info(f"✓ {domain} confirmed available by {len(results)} services")
+                                # If AVAILABLE - one WHOIS confirmation is enough (no registration data = available)
+                                if result == True:
+                                    logger.info(f"✓ {domain} AVAILABLE (confirmed by {service['name']})")
                                     executor.shutdown(wait=False, cancel_futures=True)
                                     return 'available'
                             
@@ -295,19 +296,7 @@ class ServiceRotator:
         except Exception as e:
             logger.error(f"Check error: {e}")
         
-        # Evaluate results
-        if not results:
-            return 'taken'
-        
-        true_count = sum(1 for r, _ in results if r == True)
-        false_count = sum(1 for r, _ in results if r == False)
-        
-        if false_count > 0:
-            return 'taken'
-        
-        if true_count >= 3:
-            return 'available'
-        
+        # No definitive result
         return 'taken'
     
     def _check_with_service(self, domain, service, proxy):
@@ -368,11 +357,11 @@ class ServiceRotator:
             return None
     
     def _recovery_loop(self):
-        """Aggressively recover services - CHECK MAIN IP MORE FREQUENTLY"""
+        """Check if rate-limited services can use main IP again"""
         test_domains = ['google.com', 'facebook.com', 'amazon.com']
         
         while True:
-            time.sleep(self.RECOVERY_CHECK_INTERVAL)  # Check every 10 seconds now
+            time.sleep(self.RECOVERY_CHECK_INTERVAL)
             
             try:
                 current_time = time.time()
@@ -381,13 +370,13 @@ class ServiceRotator:
                 for service in self.services:
                     status = self.service_status[service['name']]
                     
-                    # Try recovery after 20 seconds (reduced from 30)
+                    # Try recovery after 30 seconds
                     if (status['proxy_needed'] and 
-                        current_time - status['main_ip_last_fail'] > 20):
+                        current_time - status['main_ip_last_fail'] > 30):
                         
                         try:
                             test_domain = random.choice(test_domains)
-                            # Test with main IP and apply proper delay
+                            # Test with main IP - apply delay
                             time_since_last = current_time - status['main_ip_last_request']
                             if time_since_last < self.MAIN_IP_DELAY:
                                 time.sleep(self.MAIN_IP_DELAY - time_since_last)
@@ -399,12 +388,13 @@ class ServiceRotator:
                                 status['main_ip_failures'] = 0
                                 status['consecutive_failures'] = 0
                                 recovered.append(service['name'])
+                                logger.debug(f"Recovered {service['name']} to main IP")
                         except:
                             pass
                     
-                    # Decay failures over time
+                    # Slow decay of failures
                     if status['consecutive_failures'] > 0:
-                        status['consecutive_failures'] = max(0, status['consecutive_failures'] - 0.5)
+                        status['consecutive_failures'] = max(0, status['consecutive_failures'] - 0.3)
                 
                 if recovered:
                     logger.info(f"Recovered {len(recovered)} services to main IP")
@@ -854,11 +844,11 @@ class DomainHunter:
                 # DYNAMIC DELAYS based on service health
                 service_health = self.service_rotator.get_health()
                 if service_health['healthy'] < 10:
-                    time.sleep(1.0)  # Many unhealthy - slow down significantly
+                    time.sleep(0.5)  # Many unhealthy - slow down
                 elif service_health['healthy'] < 20:
-                    time.sleep(0.4)  # Some unhealthy - moderate delay
+                    time.sleep(0.2)  # Some unhealthy - moderate delay
                 else:
-                    time.sleep(0.15)  # Healthy - minimal delay
+                    time.sleep(0.05)  # Healthy - minimal delay
                 
                 # Save state periodically
                 if self.check_count % 100 == 0:
@@ -877,7 +867,7 @@ class DomainHunter:
     
     def run(self):
         logger.info("="*60)
-        logger.info("DOMAIN HUNTER V6 - OPTIMIZED PROXY/MAIN IP")
+        logger.info("DOMAIN HUNTER V6 - FIXED")
         logger.info("="*60)
         logger.info(f"Resuming from: {self.state['current_length']} chars, "
                    f"TLD #{self.state['current_tld_index']}, "
@@ -885,11 +875,11 @@ class DomainHunter:
         logger.info(f"Previously found: {len(self.found_domains)} domains")
         logger.info(f"Total checked: {self.check_count}")
         logger.info("Features:")
-        logger.info("  • Strategic delays: 600ms main IP, 150ms proxy")
-        logger.info("  • More patient before switching to proxy (5 failures)")
-        logger.info("  • Faster recovery checks (every 10 seconds)")
-        logger.info("  • Dynamic delays based on service health")
-        logger.info("  • Rate limit aware request spacing")
+        logger.info("  • ONE service confirming available = domain is available")
+        logger.info("  • No registration data = available (that's how WHOIS works)")
+        logger.info("  • Fast delays: 250ms main IP, 50ms proxy")
+        logger.info("  • Very patient: 7 failures before switching to proxy")
+        logger.info("  • Checks 6 services per domain for better coverage")
         logger.info("="*60)
         
         try:
