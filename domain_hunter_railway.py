@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Priority TLDs
 PRIORITY_TLDS = [
-    'xyz', 'app', 'dev', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
+    'com', 'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
 ]
 
 class ProxyManager:
@@ -137,21 +137,32 @@ class ProxyManager:
                 time.sleep(5)
 
 class WHOISChecker:
-    """Fast WHOIS checking - ONLY WHOIS services"""
+    """Fast WHOIS checking - WHOIS services + registrars that show registration data"""
     
     def __init__(self, proxy_manager):
         self.proxy_manager = proxy_manager
         
-        # WHOIS services only - no registrars
+        # ALL sources that can show registration data
         self.services = [
+            # Pure WHOIS services
             {'name': 'whois_com', 'check': self.check_whois_com},
             {'name': 'who_is', 'check': self.check_who_is},
             {'name': 'domaintools', 'check': self.check_domaintools},
             {'name': 'whoisxmlapi', 'check': self.check_whoisxmlapi},
             {'name': 'whois_icann', 'check': self.check_whois_icann},
+            {'name': 'networksolutions', 'check': self.check_networksolutions},
+            {'name': 'whoxy', 'check': self.check_whoxy},
+            
+            # Registrars that show registration data
+            {'name': 'godaddy', 'check': self.check_godaddy},
+            {'name': 'namecheap', 'check': self.check_namecheap},
+            {'name': 'hostinger', 'check': self.check_hostinger},
+            {'name': 'hover', 'check': self.check_hover},
+            {'name': 'namesilo', 'check': self.check_namesilo},
+            {'name': 'dynadot', 'check': self.check_dynadot},
         ]
         
-        logger.info(f"WHOIS checker ready with {len(self.services)} services")
+        logger.info(f"WHOIS checker ready with {len(self.services)} sources")
     
     def check_domain(self, domain):
         """Check domain - errors don't mean available, need clear confirmation"""
@@ -161,23 +172,27 @@ class WHOISChecker:
             futures = {executor.submit(self._check_with_retry, domain, s): s 
                       for s in self.services}
             
-            for future in as_completed(futures, timeout=10):
-                try:
-                    result = future.result(timeout=2)
-                    if result is not None:
-                        results.append(result)
-                        
-                        # If TAKEN (has registration) - stop immediately
-                        if result == False:
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            return 'taken'
-                        
-                        # If AVAILABLE (no registration) - stop immediately
-                        if result == True:
-                            executor.shutdown(wait=False, cancel_futures=True)
-                            return 'available'
-                except:
-                    pass
+            try:
+                for future in as_completed(futures, timeout=10):
+                    try:
+                        result = future.result(timeout=2)
+                        if result is not None:
+                            results.append(result)
+                            
+                            # If TAKEN (has registration) - stop immediately
+                            if result == False:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return 'taken'
+                            
+                            # If AVAILABLE (no registration) - stop immediately
+                            if result == True:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return 'available'
+                    except:
+                        pass
+            except TimeoutError:
+                # Some futures didn't finish - that's OK, evaluate what we have
+                executor.shutdown(wait=False, cancel_futures=True)
         
         # Evaluate results
         # If any service found registration = taken
@@ -350,6 +365,168 @@ class WHOISChecker:
                 return True
             
             if any(x in text for x in ['registrar', 'registered', 'creation date']):
+                return False
+            
+            return None
+        except:
+            return None
+    
+    def check_networksolutions(self, domain, proxy=None):
+        """Network Solutions WHOIS"""
+        try:
+            url = f"https://www.networksolutions.com/whois/results.jsp?domain={domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text.lower()
+            
+            if 'no match' in text or 'not found' in text or 'available' in text:
+                return True
+            
+            if any(x in text for x in ['registrar:', 'created:', 'expires:']):
+                return False
+            
+            return None
+        except:
+            return None
+    
+    def check_whoxy(self, domain, proxy=None):
+        """Whoxy.com WHOIS API"""
+        try:
+            url = f"https://www.whoxy.com/{domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text.lower()
+            
+            if 'not found' in text or 'no match' in text or 'available' in text:
+                return True
+            
+            if any(x in text for x in ['registrar', 'created', 'expires']):
+                return False
+            
+            return None
+        except:
+            return None
+    
+    def check_godaddy(self, domain, proxy=None):
+        """GoDaddy - shows registration status"""
+        try:
+            url = f"https://find.godaddy.com/domainsapi/v1/search/exact?q={domain}&key=dpp_search"
+            r = self._request(url, proxy, timeout=5)
+            if not r or r.status_code != 200:
+                return None
+            
+            try:
+                data = r.json()
+                if 'ExactMatchDomain' in data:
+                    is_available = data['ExactMatchDomain'].get('IsAvailable', False)
+                    return is_available  # True = available, False = taken
+            except:
+                pass
+            
+            return None
+        except:
+            return None
+    
+    def check_namecheap(self, domain, proxy=None):
+        """Namecheap - shows if domain is taken"""
+        try:
+            url = f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text.lower()
+            
+            # Clear taken indicators
+            if 'domain taken' in text or 'unavailable' in text or 'already registered' in text:
+                return False
+            
+            # Clear available indicators
+            if 'add to cart' in text and domain.lower() in text:
+                return True
+            
+            return None
+        except:
+            return None
+    
+    def check_hostinger(self, domain, proxy=None):
+        """Hostinger - shows availability"""
+        try:
+            url = f"https://www.hostinger.com/domain-name-search?domain={domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text.lower()
+            
+            if 'is available' in text and 'not available' not in text:
+                return True
+            
+            if 'taken' in text or 'unavailable' in text or 'registered' in text:
+                return False
+            
+            return None
+        except:
+            return None
+    
+    def check_hover(self, domain, proxy=None):
+        """Hover - shows registration status"""
+        try:
+            url = f"https://www.hover.com/domains/results?q={domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text.lower()
+            
+            if 'available' in text and 'not available' not in text:
+                return True
+            
+            if 'taken' in text or 'unavailable' in text or 'registered' in text:
+                return False
+            
+            return None
+        except:
+            return None
+    
+    def check_namesilo(self, domain, proxy=None):
+        """NameSilo - shows availability"""
+        try:
+            url = f"https://www.namesilo.com/domain/search-domains?query={domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text.lower()
+            
+            if 'available' in text and 'unavailable' not in text:
+                return True
+            
+            if 'unavailable' in text or 'registered' in text:
+                return False
+            
+            return None
+        except:
+            return None
+    
+    def check_dynadot(self, domain, proxy=None):
+        """Dynadot - shows registration status"""
+        try:
+            url = f"https://www.dynadot.com/domain/search.html?domain={domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text.lower()
+            
+            if 'add to cart' in text and domain.lower() in text:
+                return True
+            
+            if 'taken' in text or 'registered' in text or 'unavailable' in text:
                 return False
             
             return None
@@ -569,7 +746,7 @@ class DomainHunter:
         logger.info(f"Found: {len(self.found_domains)} | Checked: {self.check_count}")
         logger.info("Logic:")
         logger.info("  • Fast DNS pre-check")
-        logger.info("  • WHOIS services ONLY (no registrars)")
+        logger.info(f"  • {len(self.whois_checker.services)} sources (WHOIS + registrars)")
         logger.info("  • No registration data = available")
         logger.info("  • ANY registration data = taken")
         logger.info("  • Errors = retry with different IP/proxy")
