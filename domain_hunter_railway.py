@@ -183,11 +183,6 @@ class WHOISChecker:
                             if result == False:
                                 executor.shutdown(wait=False, cancel_futures=True)
                                 return 'taken'
-                            
-                            # If AVAILABLE (no registration) - stop immediately
-                            if result == True:
-                                executor.shutdown(wait=False, cancel_futures=True)
-                                return 'available'
                     except:
                         pass
             except TimeoutError:
@@ -261,6 +256,24 @@ class WHOISChecker:
         else:
             return requests.get(url, headers=headers, timeout=timeout, verify=False)
     
+    def _is_error_page(self, text):
+        error_phrases = [
+            'rate limit',
+            'too many requests',
+            'blocked',
+            'captcha',
+            'forbidden',
+            'access denied',
+            'request limit',
+            'ip blocked',
+            'error 429',
+            'try again later',
+            'temporarily unavailable',
+            'service unavailable',
+            'bad request'
+        ]
+        return any(phrase in text.lower() for phrase in error_phrases)
+    
     # WHOIS service implementations
     def check_whois_com(self, domain, proxy=None):
         """whois.com - reliable WHOIS lookup"""
@@ -271,6 +284,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             # Clear indicators of availability
             if 'no match' in text or 'not found' in text or 'available for registration' in text:
@@ -292,14 +307,16 @@ class WHOISChecker:
             if not r or r.status_code != 200:
                 return None
             
-            text = r.text
+            text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             # Available indicators
-            if 'No Data Found' in text or 'NOT FOUND' in text or 'No match for' in text:
+            if 'no data found' in text or 'not found' in text or 'no match for' in text:
                 return True
             
             # Taken indicators
-            if any(x in text for x in ['Registrar:', 'Created:', 'Expires:', 'Updated:']):
+            if any(x in text for x in ['registrar:', 'created:', 'expires:', 'updated:']):
                 return False
             
             return None
@@ -315,6 +332,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             if 'not found' in text or 'no match' in text or 'available' in text:
                 return True
@@ -360,6 +379,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             if 'not found' in text or 'no match' in text:
                 return True
@@ -380,6 +401,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             if 'no match' in text or 'not found' in text or 'available' in text:
                 return True
@@ -400,6 +423,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             if 'not found' in text or 'no match' in text or 'available' in text:
                 return True
@@ -440,6 +465,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             # Clear taken indicators
             if 'domain taken' in text or 'unavailable' in text or 'already registered' in text:
@@ -462,6 +489,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             if 'is available' in text and 'not available' not in text:
                 return True
@@ -482,6 +511,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             if 'available' in text and 'not available' not in text:
                 return True
@@ -502,6 +533,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             if 'available' in text and 'unavailable' not in text:
                 return True
@@ -522,6 +555,8 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
+            if self._is_error_page(text):
+                return None
             
             if 'add to cart' in text and domain.lower() in text:
                 return True
