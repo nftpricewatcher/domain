@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 
 # Priority TLDs
 PRIORITY_TLDS = [
-    'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
+    'fm', 'am', 'is', 'it', 'tv', 'cc', 'ws',
+    'com', 'net', 'org', 'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
 ]
 
 class ProxyManager:
@@ -86,26 +87,6 @@ class ProxyManager:
                 'https://api.proxyscrape.com/v2/?request=get&protocol=http&timeout=10000&country=all&simplified=true',
                 'https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt',
                 'https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt',
-                'https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt',
-                'https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTP_RAW.txt',
-                'https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt',
-                'https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt',
-                'https://raw.githubusercontent.com/proxy4parsing/proxy-scraper/master/http.txt',
-                'https://raw.githubusercontent.com/hendrikbgr/Free-Proxy-Repo/master/proxy_list.txt',
-                'https://raw.githubusercontent.com/shiftytr/proxy-list/master/proxy.txt',
-                'https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt',
-                'https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt',
-                'https://raw.githubusercontent.com/elliotwutingfeng/GlobalAntiCensorshipMirrors/main/proxies_http.txt',
-                'https://raw.githubusercontent.com/yokelvin/free-proxy-list/main/http.txt',
-                'https://raw.githubusercontent.com/MuRongyunzi/free-proxy-list/main/http.txt',
-                'https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt',
-                'https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt',
-                'https://raw.githubusercontent.com/proxylist-to/proxy-list/main/http.txt',
-                'https://raw.githubusercontent.com/hanwayTech/free-proxy-list/main/http.txt',
-                'https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt',
-                'https://raw.githubusercontent.com/saschazesiger/Free-Proxies/master/proxies/http.txt',
-                'https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt',
-                'https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/HTTP.txt'
             ]
             
             found = set()
@@ -114,7 +95,7 @@ class ProxyManager:
                     r = requests.get(url, timeout=5)
                     if r.status_code == 200:
                         found.update(re.findall(r'\d+\.\d+\.\d+\.\d+:\d+', r.text)[:200])
-                        if len(found) > 600:
+                        if len(found) > 300:
                             break
                 except:
                     pass
@@ -203,6 +184,11 @@ class WHOISChecker:
                             if result == False:
                                 executor.shutdown(wait=False, cancel_futures=True)
                                 return 'taken'
+                            
+                            # If AVAILABLE (no registration) - stop immediately
+                            if result == True:
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return 'available'
                     except:
                         pass
             except TimeoutError:
@@ -260,6 +246,168 @@ class WHOISChecker:
                 self.proxy_manager.mark_bad(proxy)
             return None
     
+    def check_price(self, domain):
+        """Check domain price at registrars - return None if can't determine"""
+        # Try top 5 registrars for price info
+        price_checkers = [
+            self.get_godaddy_price,
+            self.get_namecheap_price,
+            self.get_dynadot_price,
+            self.get_namesilo_price,
+            self.get_hover_price,
+        ]
+        
+        # Try each price checker with quick timeout
+        for checker in price_checkers:
+            try:
+                price = checker(domain)
+                if price is not None:
+                    return price
+            except:
+                continue
+        
+        # Couldn't get price from any registrar
+        return None
+    
+    def get_godaddy_price(self, domain):
+        """Get price from GoDaddy API"""
+        try:
+            proxy = self.proxy_manager.get_proxy() if random.random() < 0.5 else None
+            
+            url = f"https://find.godaddy.com/domainsapi/v1/search/exact?q={domain}&key=dpp_search"
+            r = self._request(url, proxy, timeout=5)
+            if not r or r.status_code != 200:
+                return None
+            
+            data = r.json()
+            if 'ExactMatchDomain' in data:
+                exact = data['ExactMatchDomain']
+                # Check if it's a premium domain
+                if exact.get('IsPremium', False):
+                    if 'Price' in exact:
+                        return int(exact['Price'])
+                    return 999  # Premium but no price shown
+                
+                # Regular domain - get standard price
+                if 'Price' in exact:
+                    return int(exact['Price'])
+            
+            return None
+        except:
+            return None
+    
+    def get_namecheap_price(self, domain):
+        """Get price from Namecheap"""
+        try:
+            proxy = self.proxy_manager.get_proxy() if random.random() < 0.5 else None
+            
+            url = f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
+            r = self._request(url, proxy, timeout=5)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text
+            
+            # Look for price patterns
+            price_matches = re.findall(r'\$([0-9,]+\.?\d{0,2})', text)
+            if price_matches:
+                for match in price_matches:
+                    price_str = match.replace(',', '')
+                    try:
+                        price = float(price_str)
+                        if price > 5:  # Reasonable domain price threshold
+                            return int(price)
+                    except:
+                        continue
+            
+            return None
+        except:
+            return None
+    
+    def get_dynadot_price(self, domain):
+        """Get price from Dynadot"""
+        try:
+            proxy = self.proxy_manager.get_proxy() if random.random() < 0.5 else None
+            
+            url = f"https://www.dynadot.com/domain/search.html?domain={domain}"
+            r = self._request(url, proxy, timeout=5)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text
+            
+            # Look for price
+            price_matches = re.findall(r'\$([0-9,]+\.?\d{0,2})', text)
+            if price_matches:
+                for match in price_matches:
+                    price_str = match.replace(',', '')
+                    try:
+                        price = float(price_str)
+                        if 5 < price < 50000:  # Reasonable range
+                            return int(price)
+                    except:
+                        continue
+            
+            return None
+        except:
+            return None
+    
+    def get_namesilo_price(self, domain):
+        """Get price from NameSilo"""
+        try:
+            proxy = self.proxy_manager.get_proxy() if random.random() < 0.5 else None
+            
+            url = f"https://www.namesilo.com/domain/search-domains?query={domain}"
+            r = self._request(url, proxy, timeout=5)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text
+            
+            # Look for price
+            price_matches = re.findall(r'\$([0-9,]+\.?\d{0,2})', text)
+            if price_matches:
+                for match in price_matches:
+                    price_str = match.replace(',', '')
+                    try:
+                        price = float(price_str)
+                        if 5 < price < 50000:
+                            return int(price)
+                    except:
+                        continue
+            
+            return None
+        except:
+            return None
+    
+    def get_hover_price(self, domain):
+        """Get price from Hover"""
+        try:
+            proxy = self.proxy_manager.get_proxy() if random.random() < 0.5 else None
+            
+            url = f"https://www.hover.com/domains/results?q={domain}"
+            r = self._request(url, proxy, timeout=5)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text
+            
+            # Look for price
+            price_matches = re.findall(r'\$([0-9,]+\.?\d{0,2})', text)
+            if price_matches:
+                for match in price_matches:
+                    price_str = match.replace(',', '')
+                    try:
+                        price = float(price_str)
+                        if 5 < price < 50000:
+                            return int(price)
+                    except:
+                        continue
+            
+            return None
+        except:
+            return None
+    
     def _request(self, url, proxy=None, timeout=6):
         """Make HTTP request"""
         headers = {
@@ -276,24 +424,6 @@ class WHOISChecker:
         else:
             return requests.get(url, headers=headers, timeout=timeout, verify=False)
     
-    def _is_error_page(self, text):
-        error_phrases = [
-            'rate limit',
-            'too many requests',
-            'blocked',
-            'captcha',
-            'forbidden',
-            'access denied',
-            'request limit',
-            'ip blocked',
-            'error 429',
-            'try again later',
-            'temporarily unavailable',
-            'service unavailable',
-            'bad request'
-        ]
-        return any(phrase in text.lower() for phrase in error_phrases)
-    
     # WHOIS service implementations
     def check_whois_com(self, domain, proxy=None):
         """whois.com - reliable WHOIS lookup"""
@@ -304,15 +434,13 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             # Clear indicators of availability
             if 'no match' in text or 'not found' in text or 'available for registration' in text:
                 return True
             
             # Clear indicators of registration
-            if any(x in text for x in ['registrar:', 'creation date:', 'registry expiry', 'domain name:']):
+            if any(x in text for x in ['registrar:', 'creation date:', 'registry expiry', 'updated date:']):
                 return False
             
             return None
@@ -334,7 +462,7 @@ class WHOISChecker:
                 return True
             
             # Taken indicators
-            if any(x in text for x in ['Registrar:', 'Created:', 'Expires:', 'Domain Name:']):
+            if any(x in text for x in ['Registrar:', 'Created:', 'Expires:', 'Updated:']):
                 return False
             
             return None
@@ -350,8 +478,6 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             if 'not found' in text or 'no match' in text or 'available' in text:
                 return True
@@ -397,8 +523,6 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             if 'not found' in text or 'no match' in text:
                 return True
@@ -419,8 +543,6 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             if 'no match' in text or 'not found' in text or 'available' in text:
                 return True
@@ -441,8 +563,6 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             if 'not found' in text or 'no match' in text or 'available' in text:
                 return True
@@ -483,8 +603,6 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             # Clear taken indicators
             if 'domain taken' in text or 'unavailable' in text or 'already registered' in text:
@@ -507,8 +625,6 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             if 'is available' in text and 'not available' not in text:
                 return True
@@ -529,8 +645,6 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             if 'available' in text and 'not available' not in text:
                 return True
@@ -551,8 +665,6 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             if 'available' in text and 'unavailable' not in text:
                 return True
@@ -573,14 +685,209 @@ class WHOISChecker:
                 return None
             
             text = r.text.lower()
-            if self._is_error_page(text):
-                return None
             
             if 'add to cart' in text and domain.lower() in text:
                 return True
             
             if 'taken' in text or 'registered' in text or 'unavailable' in text:
                 return False
+            
+            return None
+        except:
+            return None
+
+class PriceChecker:
+    """Check domain prices - filter out premium domains"""
+    
+    def __init__(self, proxy_manager):
+        self.proxy_manager = proxy_manager
+        self.max_price = 100  # Anything over $100 = premium
+        
+        logger.info("Price checker ready")
+    
+    def check_price(self, domain):
+        """Check if domain is affordable - returns True if price <= $100, False if premium"""
+        # Try multiple registrars in parallel
+        registrars = [
+            {'name': 'godaddy', 'check': self.check_godaddy_price},
+            {'name': 'namecheap', 'check': self.check_namecheap_price},
+            {'name': 'hover', 'check': self.check_hover_price},
+        ]
+        
+        prices = []
+        
+        with ThreadPoolExecutor(max_workers=len(registrars)) as executor:
+            futures = {executor.submit(self._check_with_retry, domain, r): r 
+                      for r in registrars}
+            
+            try:
+                for future in as_completed(futures, timeout=8):
+                    try:
+                        price = future.result(timeout=2)
+                        if price is not None:
+                            prices.append(price)
+                            
+                            # If ANY registrar says premium (>$100) - it's premium
+                            if price > self.max_price:
+                                logger.debug(f"{domain} is PREMIUM (${price})")
+                                executor.shutdown(wait=False, cancel_futures=True)
+                                return False
+                    except:
+                        pass
+            except TimeoutError:
+                executor.shutdown(wait=False, cancel_futures=True)
+        
+        # Evaluate prices
+        if not prices:
+            # No price found - assume standard pricing (safe default)
+            return True
+        
+        # If we got prices and all are under $100
+        avg_price = sum(prices) / len(prices)
+        if avg_price <= self.max_price:
+            logger.debug(f"{domain} is affordable (~${avg_price:.2f})")
+            return True
+        
+        logger.debug(f"{domain} is PREMIUM (~${avg_price:.2f})")
+        return False
+    
+    def _check_with_retry(self, domain, registrar):
+        """Check price with retry"""
+        use_proxy = random.random() < 0.5
+        
+        # First attempt
+        price = self._check(domain, registrar, use_proxy)
+        if price is not None:
+            return price
+        
+        # Retry with opposite strategy
+        price = self._check(domain, registrar, not use_proxy)
+        if price is not None:
+            return price
+        
+        return None
+    
+    def _check(self, domain, registrar, use_proxy):
+        """Single price check"""
+        proxy = None
+        if use_proxy:
+            proxy = self.proxy_manager.get_proxy()
+            if not proxy:
+                return None
+        
+        try:
+            return registrar['check'](domain, proxy)
+        except:
+            return None
+    
+    def _request(self, url, proxy=None, timeout=6):
+        """Make HTTP request"""
+        headers = {
+            'User-Agent': random.choice([
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36'
+            ])
+        }
+        
+        if proxy:
+            proxies = {'http': f'http://{proxy}', 'https': f'http://{proxy}'}
+            return requests.get(url, headers=headers, proxies=proxies, timeout=timeout, verify=False)
+        else:
+            return requests.get(url, headers=headers, timeout=timeout, verify=False)
+    
+    def _extract_price(self, text):
+        """Extract price from text - finds $XX.XX or XX.XX"""
+        # Look for price patterns
+        patterns = [
+            r'\$(\d+(?:\.\d{2})?)',  # $123.45
+            r'(\d+(?:\.\d{2})?)(?:\s*(?:USD|usd|\$))',  # 123.45 USD
+            r'price[:\s]+\$?(\d+(?:\.\d{2})?)',  # price: $123.45
+            r'(\d+(?:\.\d{2})?)\s*per\s*year',  # 123.45 per year
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                try:
+                    return float(match.group(1))
+                except:
+                    pass
+        
+        return None
+    
+    def check_godaddy_price(self, domain, proxy=None):
+        """GoDaddy price check"""
+        try:
+            url = f"https://find.godaddy.com/domainsapi/v1/search/exact?q={domain}&key=dpp_search"
+            r = self._request(url, proxy, timeout=5)
+            if not r or r.status_code != 200:
+                return None
+            
+            try:
+                data = r.json()
+                if 'ExactMatchDomain' in data:
+                    # Check for premium flag
+                    if data['ExactMatchDomain'].get('IsPremium', False):
+                        return 9999  # Premium indicator
+                    
+                    # Try to get price
+                    price_info = data['ExactMatchDomain'].get('Price', {})
+                    if isinstance(price_info, dict):
+                        list_price = price_info.get('ListPrice', 0)
+                        if list_price:
+                            return float(list_price)
+                    
+                    # If no premium flag and no high price, assume standard
+                    return 10  # Standard domain price
+            except:
+                pass
+            
+            return None
+        except:
+            return None
+    
+    def check_namecheap_price(self, domain, proxy=None):
+        """Namecheap price check"""
+        try:
+            url = f"https://www.namecheap.com/domains/registration/results/?domain={domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text
+            
+            # Check for premium indicator
+            if 'premium' in text.lower() or 'make offer' in text.lower():
+                return 9999
+            
+            # Try to extract price
+            price = self._extract_price(text)
+            if price:
+                return price
+            
+            return None
+        except:
+            return None
+    
+    def check_hover_price(self, domain, proxy=None):
+        """Hover price check"""
+        try:
+            url = f"https://www.hover.com/domains/results?q={domain}"
+            r = self._request(url, proxy)
+            if not r or r.status_code != 200:
+                return None
+            
+            text = r.text
+            
+            # Check for premium
+            if 'premium' in text.lower():
+                return 9999
+            
+            # Extract price
+            price = self._extract_price(text)
+            if price:
+                return price
             
             return None
         except:
@@ -598,6 +905,7 @@ class DomainHunter:
         
         self.proxy_manager = ProxyManager()
         self.whois_checker = WHOISChecker(self.proxy_manager)
+        self.price_checker = PriceChecker(self.proxy_manager)
         
         threading.Timer(3, self.proxy_manager.trigger_scrape).start()
         
@@ -765,6 +1073,14 @@ class DomainHunter:
                 self.check_count += 1
                 
                 if status == 'available':
+                    # Check price - filter out premium domains
+                    logger.debug(f"{domain} is available - checking price...")
+                    is_affordable = self.price_checker.check_price(domain)
+                    
+                    if not is_affordable:
+                        logger.info(f"⚠️  SKIP: {domain} (premium pricing)")
+                        continue
+                    
                     result = {
                         'domain': domain,
                         'length': length,
@@ -772,7 +1088,7 @@ class DomainHunter:
                         'status': 'available'
                     }
                     self.found_domains.append(result)
-                    logger.info(f"🎯 FOUND: {domain}")
+                    logger.info(f"🎯 FOUND: {domain} (affordable)")
                     self.save_results()
                     time.sleep(1)
                 
@@ -802,6 +1118,7 @@ class DomainHunter:
         logger.info(f"  • {len(self.whois_checker.services)} sources (WHOIS + registrars)")
         logger.info("  • No registration data = available")
         logger.info("  • ANY registration data = taken")
+        logger.info("  • Price check: Skip if > $100 (premium)")
         logger.info("  • Errors = retry with different IP/proxy")
         logger.info("  • 50% proxy usage for speed")
         logger.info("="*60)
