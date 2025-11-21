@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 
 # Priority TLDs
 PRIORITY_TLDS = [
-    'com', 'app', 'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
+    'dev', 'xyz', 'pro', 'biz', 'top', 'fun', 'art', 'bot'
 ]
 
 class ProxyManager:
